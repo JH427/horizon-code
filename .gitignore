@@ -1,0 +1,5 @@
+.horizon-code/
+/bin/
+/horizon-code
+*.test
+*.out
