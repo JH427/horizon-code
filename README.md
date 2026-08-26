@@ -100,4 +100,4 @@ Useful overrides:
 
 ## Toolchain
 
-Go 1.25.8 or newer is required by the pinned Charm v2 dependencies. Go's toolchain selection downloads the required toolchain when necessary.
+Go 1.25.8 or newer is required by the pinned Charm v2 dependencies. Go's toolchain selection downloads the required toolchain when necessary. The `search_code` tool also requires `ripgrep` (`rg`) on `PATH`.
