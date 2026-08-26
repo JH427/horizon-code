@@ -20,6 +20,7 @@ import (
 	"github.com/JH427/horizon-code/internal/agent"
 	"github.com/JH427/horizon-code/internal/instructions"
 	"github.com/JH427/horizon-code/internal/model"
+	"github.com/JH427/horizon-code/internal/resources"
 	"github.com/JH427/horizon-code/internal/server"
 	"github.com/JH427/horizon-code/internal/session"
 	"github.com/JH427/horizon-code/internal/tools"
@@ -183,7 +184,8 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 			fmt.Fprintln(errorOutput, "tool cleanup error:", err)
 		}
 	}()
-	engine := agent.NewEngineWithBudget(modelClient, availableTools, agentBudget(config.capability))
+	budget := agentBudget(config.capability)
+	engine := agent.NewEngineWithBudget(modelClient, availableTools, budget)
 	engine.SetCapabilityPolicy(capabilityInstructions(config.capability))
 	instructionsFound, err := configureWorkspaceInstructions(engine, config.workspace)
 	if err != nil {
@@ -228,7 +230,15 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 
 	interfaceModel := tui.NewModel(recordedEngine, config.model, config.workspace)
 	interfaceModel.SetServedContext(modelClient.ContextSize())
+	interfaceModel.SetActiveContextLimit(budget.MaxContextTokens)
 	interfaceModel.SetCapability(string(config.capability))
+	displayedTools := make([]string, 0, len(availableTools))
+	for _, availableTool := range availableTools {
+		displayedTools = append(displayedTools, availableTool.Definition().Name)
+	}
+	interfaceModel.SetAvailableTools(displayedTools)
+	resourceSampler := resources.NewLinuxSampler("/proc/meminfo", "/sys/class/drm")
+	interfaceModel.SetResourceSampler(resourceSampler)
 	program := tea.NewProgram(interfaceModel, tea.WithContext(ctx))
 	_, err = program.Run()
 	return err

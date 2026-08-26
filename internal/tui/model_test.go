@@ -12,11 +12,19 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/JH427/horizon-code/internal/agent"
+	"github.com/JH427/horizon-code/internal/resources"
 )
 
 type noopRunner struct{}
 
 func (noopRunner) Run(context.Context, string, func(agent.Event)) (string, error) {
+	return "", nil
+}
+
+type countingRunner struct{ calls int }
+
+func (runner *countingRunner) Run(context.Context, string, func(agent.Event)) (string, error) {
+	runner.calls++
 	return "", nil
 }
 
@@ -49,6 +57,180 @@ func TestModelRendersToolLifecycleAndAssistantText(t *testing.T) {
 	}
 	if count := strings.Count(view, "⚙ read_file"); count != 1 {
 		t.Fatalf("tool call rendered %d rows, want one updated row:\n%s", count, view)
+	}
+}
+
+func TestHelpSlashCommandRunsLocally(t *testing.T) {
+	runner := &countingRunner{}
+	model := NewModel(runner, "qwen38-27b", "/workspace")
+	model.composer.SetValue("/help")
+
+	updated, command := model.submit()
+	state := updated.(Model)
+	if command != nil {
+		t.Fatal("/help returned an asynchronous model command")
+	}
+	if runner.calls != 0 {
+		t.Fatalf("/help invoked model runner %d times", runner.calls)
+	}
+	if state.busy {
+		t.Fatal("/help marked model busy")
+	}
+	if len(state.blocks) != 1 || !strings.Contains(state.blocks[0].text, "/status") || !strings.Contains(state.blocks[0].text, "/clear") || !strings.Contains(strings.ToLower(state.blocks[0].text), "pgup") || !strings.Contains(strings.ToLower(state.blocks[0].text), "esc") {
+		t.Fatalf("/help output is not useful: %#v", state.blocks)
+	}
+}
+
+func TestSlashCommandsRejectArgumentsLocally(t *testing.T) {
+	runner := &countingRunner{}
+	model := NewModel(runner, "qwen38-27b", "/workspace")
+	model.composer.SetValue("/status extra")
+
+	updated, command := model.submit()
+	state := updated.(Model)
+	if command != nil || runner.calls != 0 {
+		t.Fatal("slash command with arguments escaped local routing")
+	}
+	if len(state.blocks) != 1 || !strings.Contains(state.blocks[0].text, "Usage: /status") {
+		t.Fatalf("argument rejection is unclear: %#v", state.blocks)
+	}
+}
+
+func TestClearSlashCommandClearsVisibleTranscriptOnly(t *testing.T) {
+	runner := &countingRunner{}
+	model := NewModel(runner, "qwen38-27b", "/workspace")
+	model.blocks = []block{{kind: blockUser, text: "old prompt"}, {kind: blockAssistant, text: "old answer"}}
+	model.contextTokens = 1234
+	model.contextValid = true
+	model.composer.SetValue("/clear")
+
+	updated, command := model.submit()
+	state := updated.(Model)
+	if command != nil || runner.calls != 0 {
+		t.Fatal("/clear escaped the local command path")
+	}
+	if len(state.blocks) != 0 {
+		t.Fatalf("/clear left transcript blocks: %#v", state.blocks)
+	}
+	if !state.contextValid || state.contextTokens != 1234 {
+		t.Fatalf("/clear reset runtime telemetry: %#v", state)
+	}
+}
+
+func TestClearSlashCommandIsRejectedWhileBusy(t *testing.T) {
+	model := NewModel(noopRunner{}, "qwen38-27b", "/workspace")
+	model.busy = true
+	model.blocks = []block{{kind: blockTool, callID: "call-1", text: "running"}}
+	model.composer.SetValue("/clear")
+
+	updated, command := model.submit()
+	state := updated.(Model)
+	if command != nil {
+		t.Fatal("busy /clear returned asynchronous command")
+	}
+	if len(state.blocks) != 2 || state.blocks[0].callID != "call-1" || !strings.Contains(state.blocks[1].text, "unavailable while a turn is running") {
+		t.Fatalf("busy /clear damaged tool lifecycle: %#v", state.blocks)
+	}
+}
+
+func TestOrdinaryPromptStaysQueuedWhileBusy(t *testing.T) {
+	model := NewModel(noopRunner{}, "qwen38-27b", "/workspace")
+	model.busy = true
+	model.composer.SetValue("next task")
+	updated, command := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	state := updated.(Model)
+	if command != nil || state.composer.Value() != "next task" || len(state.blocks) != 0 {
+		t.Fatalf("busy prompt was not preserved: command=%v composer=%q blocks=%#v", command, state.composer.Value(), state.blocks)
+	}
+}
+
+func TestRuntimeSlashCommandsUseInjectedCapabilityMetadata(t *testing.T) {
+	model := NewModel(noopRunner{}, "qwen38-27b", "/workspace")
+	model.SetServedContext(262144)
+	model.SetActiveContextLimit(49152)
+	model.SetCapability("workspace")
+	model.SetAvailableTools([]string{"read_file", "exec_command", "read_file"})
+
+	for _, test := range []struct {
+		command string
+		wants   []string
+	}{
+		{command: "/model", wants: []string{"qwen38-27b", "49.2k", "262k", "/workspace"}},
+		{command: "/tools", wants: []string{"read_file", "exec_command"}},
+		{command: "/capability", wants: []string{"workspace", "not an OS sandbox", "restart"}},
+	} {
+		model.blocks = nil
+		model.composer.SetValue(test.command)
+		updated, command := model.submit()
+		state := updated.(Model)
+		if command != nil {
+			t.Fatalf("%s returned asynchronous command", test.command)
+		}
+		if len(state.blocks) != 1 {
+			t.Fatalf("%s blocks = %#v", test.command, state.blocks)
+		}
+		for _, want := range test.wants {
+			if !strings.Contains(strings.ToLower(state.blocks[0].text), strings.ToLower(want)) {
+				t.Fatalf("%s output lacks %q: %q", test.command, want, state.blocks[0].text)
+			}
+		}
+		model = state
+	}
+}
+
+func TestRuntimeMetadataCannotInjectTerminalControls(t *testing.T) {
+	model := NewModel(noopRunner{}, "safe\x1b]0;MODEL_PWNED\a", "/workspace\x1b]0;WS_PWNED\a")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	state := updated.(Model)
+	for _, slashCommand := range []string{"/model", "/status"} {
+		state.composer.SetValue(slashCommand)
+		result, _ := state.submit()
+		state = result.(Model)
+	}
+	raw := state.View().Content
+	if strings.Contains(raw, "\x1b]0;") || strings.Contains(raw, "\a") || strings.Contains(raw, "PWNED") {
+		t.Fatalf("runtime metadata reached terminal output unsanitized: %q", raw)
+	}
+}
+
+func TestQuitSlashCommandCancelsBusyRunAndQuits(t *testing.T) {
+	model := NewModel(noopRunner{}, "qwen38-27b", "/workspace")
+	cancelled := false
+	model.busy = true
+	model.cancel = func() { cancelled = true }
+	model.composer.SetValue("/quit")
+
+	updated, command := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	state := updated.(Model)
+	if !cancelled {
+		t.Fatal("/quit did not cancel active run")
+	}
+	if command != nil {
+		t.Fatal("/quit exited before the active runner unwound")
+	}
+	if !state.quitting {
+		t.Fatal("/quit did not retain drain-before-exit state")
+	}
+	if state.composer.Value() != "" {
+		t.Fatalf("/quit left composer value %q", state.composer.Value())
+	}
+}
+
+func TestQuitWaitsForActiveRunTerminalUpdateBeforeExit(t *testing.T) {
+	model := NewModel(noopRunner{}, "qwen38-27b", "/workspace")
+	model.busy = true
+	model.quitting = true
+	model.runEvents = make(chan runUpdate)
+	updated, command := model.Update(runUpdateMsg{update: runUpdate{err: context.Canceled, done: true}})
+	state := updated.(Model)
+	if state.busy || state.runEvents != nil || state.cancel != nil {
+		t.Fatalf("terminal update did not finish run lifecycle: %#v", state)
+	}
+	if command == nil {
+		t.Fatal("terminal run update did not exit after cancellation drained")
+	}
+	if _, ok := command().(tea.QuitMsg); !ok {
+		t.Fatalf("terminal update command returned %T, want tea.QuitMsg", command())
 	}
 }
 
@@ -255,7 +437,7 @@ func TestLeanShellIsDenseAndResponsive(t *testing.T) {
 	model := NewModel(noopRunner{}, "qwen38-27b", "/workspace")
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	wide := ansi.Strip(updated.(Model).View().Content)
-	for _, want := range []string{"HORIZON", "/workspace", "ready", "qwen38-27b", "ctx —", "tok/s —", "enter send", "pgup/dn scroll"} {
+	for _, want := range []string{"HORIZON", "/workspace", "ready", "qwen38-27b", "ctx —", "tok/s —", "enter send", "pgup/dn scroll", "/help"} {
 		if !strings.Contains(wide, want) {
 			t.Fatalf("wide shell does not contain %q:\n%s", want, wide)
 		}
@@ -367,6 +549,98 @@ func TestLongerMarkdownFenceCanContainShorterFence(t *testing.T) {
 	}
 	if strings.Contains(view, "````") {
 		t.Fatalf("long fence marker leaked into output:\n%s", view)
+	}
+}
+
+type fixedResourceSampler struct {
+	snapshot resources.Snapshot
+	calls    int
+}
+
+func (sampler *fixedResourceSampler) Sample() resources.Snapshot {
+	sampler.calls++
+	return sampler.snapshot
+}
+
+func TestResourceSamplerRefreshesFromTick(t *testing.T) {
+	sampler := &fixedResourceSampler{snapshot: resources.Snapshot{
+		RAM: resources.Memory{UsedBytes: 1, AvailableBytes: 2, TotalBytes: 3, Valid: true},
+	}}
+	model := NewModel(noopRunner{}, "qwen38-27b", "/workspace")
+	model.SetResourceSampler(sampler)
+
+	updated, sampleCommand := model.Update(resourceTickMsg{})
+	if sampleCommand == nil {
+		t.Fatal("resource tick did not schedule sampling")
+	}
+	message, ok := sampleCommand().(resourceSampleMsg)
+	if !ok {
+		t.Fatalf("sample command returned %T", sampleCommand())
+	}
+	if sampler.calls != 1 {
+		t.Fatalf("sampler calls = %d, want 1", sampler.calls)
+	}
+	updated, nextTick := updated.(Model).Update(message)
+	state := updated.(Model)
+	if !state.resources.RAM.Valid || state.resources.RAM.TotalBytes != 3 {
+		t.Fatalf("resource sample not applied: %#v", state.resources)
+	}
+	if nextTick == nil {
+		t.Fatal("resource sample did not schedule next refresh")
+	}
+}
+
+func TestStatusSlashCommandReportsDetailedMeasuredResources(t *testing.T) {
+	model := NewModel(noopRunner{}, "qwen38-27b", "/workspace")
+	model.SetCapability("operator")
+	model.SetServedContext(262144)
+	model.contextTokens = 12288
+	model.contextLimit = 49152
+	model.contextValid = true
+	model.resources = resources.Snapshot{
+		RAM: resources.Memory{UsedBytes: 14 << 30, AvailableBytes: 110 << 30, TotalBytes: 124 << 30, Valid: true},
+		GPU: resources.GPU{
+			Card: "card1", Valid: true,
+			VRAM: resources.GPUHeap{UsedBytes: 512 << 20, TotalBytes: 1 << 30, Valid: true},
+			GTT:  resources.GPUHeap{UsedBytes: 30 << 30, TotalBytes: 124 << 30, Valid: true},
+		},
+	}
+	model.composer.SetValue("/status")
+
+	updated, command := model.submit()
+	state := updated.(Model)
+	if command != nil || len(state.blocks) != 1 {
+		t.Fatalf("/status escaped local path: command=%v blocks=%#v", command, state.blocks)
+	}
+	status := state.blocks[0].text
+	for _, want := range []string{
+		"qwen38-27b", "operator", "ready", "/workspace", "12.3k/49.2k", "native 262k",
+		"GPU allocations (system-wide): card1", "VRAM: 0.5/1 GiB", "GTT: 30 GiB allocated (124 GiB limit)",
+		"RAM: 14/124 GiB", "available 110 GiB",
+	} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("/status lacks %q:\n%s", want, status)
+		}
+	}
+}
+
+func TestResourceSnapshotRendersMeasuredGPUAndRAMLine(t *testing.T) {
+	model := NewModel(noopRunner{}, "qwen38-27b", "/workspace")
+	updated, _ := model.Update(resourceSampleMsg{snapshot: resources.Snapshot{
+		RAM: resources.Memory{UsedBytes: 14 << 30, AvailableBytes: 110 << 30, TotalBytes: 124 << 30, Valid: true},
+		GPU: resources.GPU{
+			Card: "card1", Valid: true,
+			VRAM: resources.GPUHeap{UsedBytes: 512 << 20, TotalBytes: 1 << 30, Valid: true},
+			GTT:  resources.GPUHeap{UsedBytes: 30 << 30, TotalBytes: 124 << 30, Valid: true},
+		},
+	}})
+	state := updated.(Model)
+	updated, _ = state.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	view := ansi.Strip(updated.(Model).View().Content)
+	for _, want := range []string{"GPU system · VRAM 0.5/1 GiB", "GTT 30 GiB allocated (124 GiB limit)", "RAM 14/124 GiB", "available 110 GiB"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("resource line lacks %q:\n%s", want, view)
+		}
 	}
 }
 

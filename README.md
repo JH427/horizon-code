@@ -29,7 +29,8 @@ internal/session/   local event/session persistence
 - `run_command` has no shell and accepts only selected build, test, static-check, and read-only Git commands.
 - Workspace-changing tools force a successful verification command before the agent may finish.
 - Pending verification survives cancellation into the next turn; explicit step, tool-call, repair, tool-result, and 48K active-context budgets bound each turn.
-- Borderless Bubble Tea “flight deck” with a compact activity/telemetry rail, dense semantic transcript, multiline composer, verification notices, and cancellation.
+- Borderless Bubble Tea “flight deck” with a compact activity/telemetry rail, dense semantic transcript, multiline composer, verification notices, cancellation, and local slash commands.
+- Live measured Linux resource rail: host RAM used/available/total plus separate system-wide AMD VRAM used/total and GTT allocated/limit counters. GPU allocation is not mislabeled as per-process/model usage.
 - Omarchy-native presentation: semantic ANSI palette slots and the terminal's default background, so active Omarchy terminal themes control Horizon Code without app-specific theme files.
 - Visible streamed Qwen reasoning plus tool call IDs, JSON arguments, bounded inline result previews, and failures; complete results remain in private session logs.
 - Append-only JSONL sessions and deterministic fake-model/HTTP integration tests.
@@ -67,6 +68,22 @@ horizon-code
 Launching Horizon Code starts `~/.config/horizon-llm/run-server.sh` by default, waits for `/health`, verifies that `/v1/models` contains `qwen38-27b`, and then opens the TUI. Override the launcher with `--server-command` on another setup. The inference process group is owned by that Horizon Code session and is stopped when the program exits. If the configured health endpoint already has a healthy server, Horizon Code refuses to claim or stop it.
 
 Turns, reasoning, tool arguments, and tool results are written as replayable private JSONL files under `~/.local/state/horizon-code/sessions/` (or `$XDG_STATE_HOME/horizon-code/sessions/`). This keeps arbitrary working directories clean.
+
+### Slash commands and live resources
+
+Slash commands are handled locally by the TUI and are never sent to the model or treated as tool calls:
+
+```text
+/help        command and key reference
+/status      model, context, capability, VRAM/GTT, and RAM snapshot
+/model       current model, native context, and workspace
+/tools       tools registered for the active capability
+/capability  active safety boundary and restart guidance
+/clear       clear only the visible transcript
+/quit        cancel active work and exit cleanly
+```
+
+The resource rail refreshes every two seconds. RAM is measured from `/proc/meminfo` as used (`MemTotal - MemAvailable`), available, and total. On AMD GPUs, Horizon Code accepts only exact DRM primary-card names backed by AMD's `amdgpu` driver and reports dedicated VRAM used/total separately from GTT allocated/limit. GTT is mapped host memory; its limit is not an independent physical GPU pool and is never added to VRAM as a fake GPU total. These GPU counters are system-wide allocations, not reliable per-process or model-only attribution. If more than one AMD GPU is eligible, GPU telemetry stays unavailable rather than guessing a device. Missing measurements display as unavailable, and a reported zero remains zero.
 
 ### Workspace instructions
 

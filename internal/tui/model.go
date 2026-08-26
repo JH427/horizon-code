@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -15,10 +17,15 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/JH427/horizon-code/internal/agent"
+	"github.com/JH427/horizon-code/internal/resources"
 )
 
 type Runner interface {
 	Run(context.Context, string, func(agent.Event)) (string, error)
+}
+
+type ResourceSampler interface {
+	Sample() resources.Snapshot
 }
 
 type blockKind int
@@ -41,10 +48,13 @@ type block struct {
 }
 
 type Model struct {
-	runner     Runner
-	modelName  string
-	workspace  string
-	capability string
+	runner          Runner
+	modelName       string
+	workspace       string
+	capability      string
+	toolNames       []string
+	resources       resources.Snapshot
+	resourceSampler ResourceSampler
 	// Telemetry stays presentation-only, with no agent event schema dependency.
 	contextTokens    int
 	contextLimit     int
@@ -65,12 +75,15 @@ type Model struct {
 	composer         textarea.Model
 	blocks           []block
 	busy             bool
+	quitting         bool
 	activity         string
 	cancel           context.CancelFunc
 	runEvents        <-chan runUpdate
 }
 
 type agentEventMsg struct{ event agent.Event }
+type resourceSampleMsg struct{ snapshot resources.Snapshot }
+type resourceTickMsg struct{}
 type runStartedMsg struct{ events <-chan runUpdate }
 type runUpdateMsg struct{ update runUpdate }
 
@@ -117,7 +130,7 @@ func NewModel(runner Runner, modelName, workspace string) Model {
 	view.SoftWrap = true
 	view.FillHeight = true
 	return Model{
-		runner: runner, modelName: modelName, workspace: workspace,
+		runner: runner, modelName: compactOneLine(modelName), workspace: compactOneLine(workspace),
 		viewport: view, composer: composer,
 		activity: "ready", capability: "safe",
 	}
@@ -127,12 +140,40 @@ func (model *Model) SetServedContext(tokens int) {
 	model.servedContext = tokens
 }
 
+func (model *Model) SetActiveContextLimit(tokens int) {
+	model.contextLimit = tokens
+}
+
 func (model *Model) SetCapability(capability string) {
 	model.capability = safeText(capability)
 }
 
+func (model *Model) SetAvailableTools(names []string) {
+	unique := make(map[string]struct{}, len(names))
+	model.toolNames = model.toolNames[:0]
+	for _, name := range names {
+		name = compactOneLine(name)
+		if name == "" {
+			continue
+		}
+		if _, exists := unique[name]; exists {
+			continue
+		}
+		unique[name] = struct{}{}
+		model.toolNames = append(model.toolNames, name)
+	}
+	sort.Strings(model.toolNames)
+}
+
+func (model *Model) SetResourceSampler(sampler ResourceSampler) {
+	model.resourceSampler = sampler
+}
+
 func (model Model) Init() tea.Cmd {
-	return textarea.Blink
+	if model.resourceSampler == nil {
+		return textarea.Blink
+	}
+	return tea.Batch(textarea.Blink, sampleResources(model.resourceSampler))
 }
 
 func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -148,10 +189,7 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch message.String() {
 		case "ctrl+q":
-			if model.cancel != nil {
-				model.cancel()
-			}
-			return model, tea.Quit
+			return model.requestQuit()
 		case "ctrl+c", "esc":
 			if model.busy && model.cancel != nil {
 				model.cancel()
@@ -162,8 +200,12 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return model, tea.Quit
 			}
 		case "enter":
-			if !model.busy && strings.TrimSpace(model.composer.Value()) != "" {
+			input := strings.TrimSpace(model.composer.Value())
+			if input != "" && (strings.HasPrefix(input, "/") || !model.busy) {
 				return model.submit()
+			}
+			if model.busy {
+				return model, nil
 			}
 		case "pgup":
 			model.viewport.PageUp()
@@ -175,6 +217,17 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		updatedComposer, composerCommand := model.composer.Update(message)
 		model.composer = updatedComposer
 		return model, composerCommand
+	case resourceSampleMsg:
+		model.resources = message.snapshot
+		if model.resourceSampler == nil {
+			return model, nil
+		}
+		return model, scheduleResourceTick()
+	case resourceTickMsg:
+		if model.resourceSampler == nil {
+			return model, nil
+		}
+		return model, sampleResources(model.resourceSampler)
 	case runStartedMsg:
 		model.runEvents = message.events
 		return model, waitForRun(message.events)
@@ -193,6 +246,9 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				model.activity = "ready"
 			}
 			model.refreshTranscript()
+			if model.quitting {
+				return model, tea.Quit
+			}
 			return model, nil
 		}
 		model.refreshTranscript()
@@ -220,7 +276,7 @@ func (model Model) View() tea.View {
 		return view
 	}
 	innerWidth := max(1, model.width-2)
-	header := model.renderHeader(innerWidth)
+	header := lipgloss.JoinVertical(lipgloss.Left, model.renderHeader(innerWidth), model.renderResources(innerWidth))
 	transcript := lipgloss.NewStyle().
 		Width(innerWidth).
 		Height(max(3, model.viewport.Height())).
@@ -243,6 +299,9 @@ func (model Model) View() tea.View {
 func (model Model) submit() (tea.Model, tea.Cmd) {
 	prompt := strings.TrimSpace(model.composer.Value())
 	model.composer.Reset()
+	if strings.HasPrefix(prompt, "/") {
+		return model.submitSlashCommand(prompt)
+	}
 	model.blocks = append(model.blocks, block{kind: blockUser, text: prompt})
 	model.busy = true
 	model.activity = "thinking"
@@ -266,6 +325,107 @@ func (model Model) submit() (tea.Model, tea.Cmd) {
 		return runStartedMsg{events: events}
 	}
 	return model, command
+}
+
+func (model Model) submitSlashCommand(input string) (tea.Model, tea.Cmd) {
+	fields := strings.Fields(input)
+	name := ""
+	if len(fields) > 0 {
+		name = strings.ToLower(fields[0])
+	}
+	if len(fields) > 1 && knownSlashCommand(name) {
+		model.blocks = append(model.blocks, block{kind: blockError, text: "Usage: " + name + "\nThis command does not accept arguments."})
+		model.refreshTranscript()
+		return model, nil
+	}
+	switch name {
+	case "/quit", "/exit":
+		return model.requestQuit()
+	case "/clear":
+		if model.busy {
+			model.blocks = append(model.blocks, block{kind: blockError, text: "Busy: /clear is unavailable while a turn is running. Press Esc to stop it."})
+			break
+		}
+		model.blocks = nil
+	case "/status":
+		model.blocks = append(model.blocks, block{kind: blockSystem, text: model.renderStatus()})
+	case "/model":
+		nativeContext := "unavailable"
+		if model.servedContext > 0 {
+			nativeContext = formatTokens(model.servedContext) + " tokens"
+		}
+		activeContext := "unavailable"
+		if model.contextLimit > 0 {
+			activeContext = formatTokens(model.contextLimit) + " tokens"
+		}
+		model.blocks = append(model.blocks, block{kind: blockSystem, text: fmt.Sprintf("Model: %s\nActive context: %s\nNative context: %s\nWorkspace: %s", model.modelName, activeContext, nativeContext, model.workspace)})
+	case "/tools":
+		tools := "none"
+		if len(model.toolNames) > 0 {
+			tools = strings.Join(model.toolNames, ", ")
+		}
+		model.blocks = append(model.blocks, block{kind: blockSystem, text: fmt.Sprintf("Tools available in %s capability:\n%s", model.capability, tools)})
+	case "/capability":
+		boundary := "Read/write actions are limited to the safe tool set."
+		if model.capability == "workspace" {
+			boundary = "Structured workspace execution is enabled. This is not an OS sandbox."
+		} else if model.capability == "operator" {
+			boundary = "Explicit shell-capable operator execution is enabled. This is not an OS sandbox."
+		}
+		model.blocks = append(model.blocks, block{kind: blockSystem, text: fmt.Sprintf("Capability: %s\n%s\nCapability changes require restart with --capability; slash commands cannot elevate access.", model.capability, boundary)})
+	case "/help", "/?":
+		model.blocks = append(model.blocks, block{kind: blockSystem, text: strings.Join([]string{
+			"Commands",
+			"/help        command and key reference",
+			"/status      runtime and resource snapshot",
+			"/model       current model and context",
+			"/tools       tools available in this capability",
+			"/capability  active capability and safety boundary",
+			"/clear       clear the visible transcript",
+			"/quit        stop work and exit",
+			"",
+			"Keys",
+			"Enter send · Alt+Enter newline · PgUp/PgDn scroll",
+			"Esc stop active run · Ctrl+Q quit",
+			"",
+			"Commands run locally and are never sent to the model.",
+		}, "\n")})
+	default:
+		model.blocks = append(model.blocks, block{kind: blockError, text: "Unknown command: " + safeText(input) + "\nUse /help to list commands."})
+	}
+	model.refreshTranscript()
+	return model, nil
+}
+
+func (model Model) requestQuit() (tea.Model, tea.Cmd) {
+	if !model.busy {
+		return model, tea.Quit
+	}
+	model.quitting = true
+	model.activity = "cancelling"
+	if model.cancel != nil {
+		model.cancel()
+	}
+	return model, nil
+}
+
+func knownSlashCommand(name string) bool {
+	switch name {
+	case "/help", "/?", "/clear", "/status", "/model", "/tools", "/capability", "/quit", "/exit":
+		return true
+	default:
+		return false
+	}
+}
+
+func sampleResources(sampler ResourceSampler) tea.Cmd {
+	return func() tea.Msg {
+		return resourceSampleMsg{snapshot: sampler.Sample()}
+	}
+}
+
+func scheduleResourceTick() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return resourceTickMsg{} })
 }
 
 func waitForRun(events <-chan runUpdate) tea.Cmd {
@@ -392,7 +552,14 @@ func (model *Model) resize() {
 	innerWidth := max(1, model.width-2)
 	model.composer.SetWidth(max(1, innerWidth-4))
 	model.viewport.SetWidth(innerWidth)
-	model.viewport.SetHeight(max(3, model.height-5))
+	model.viewport.SetHeight(max(3, model.height-model.chromeHeight()))
+}
+
+func (model Model) chromeHeight() int {
+	if model.width-2 >= 80 {
+		return 7
+	}
+	return 6
 }
 
 func (model *Model) refreshTranscript() {
@@ -779,6 +946,116 @@ func (model Model) renderHeader(width int) string {
 	return lipgloss.NewStyle().Width(width).Render(left + gap + right)
 }
 
+func (model Model) renderStatus() string {
+	lines := []string{
+		"Runtime",
+		"Model: " + model.modelName,
+		"Workspace: " + model.workspace,
+		"Activity: " + model.activity,
+		"Capability: " + model.capability,
+		"Active context limit: " + formatOptionalTokens(model.contextLimit),
+		"Model telemetry: " + model.renderTelemetry(),
+	}
+	if model.resources.GPU.Valid {
+		lines = append(lines, "GPU allocations (system-wide): "+safeText(model.resources.GPU.Card))
+	} else {
+		lines = append(lines, "GPU allocations (system-wide): unavailable")
+	}
+	lines = append(lines,
+		"VRAM: "+formatGPUHeap(model.resources.GPU.VRAM),
+		"GTT: "+formatGTT(model.resources.GPU.GTT),
+	)
+	if model.resources.RAM.Valid {
+		ram := model.resources.RAM
+		lines = append(lines, "RAM: "+formatGiB(ram.UsedBytes)+"/"+formatGiB(ram.TotalBytes)+" GiB · available "+formatGiB(ram.AvailableBytes)+" GiB")
+	} else {
+		lines = append(lines, "RAM: unavailable")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatGTT(heap resources.GPUHeap) string {
+	if !heap.Valid {
+		return "unavailable"
+	}
+	return formatGiB(heap.UsedBytes) + " GiB allocated (" + formatGiB(heap.TotalBytes) + " GiB limit)"
+}
+
+func formatGPUHeap(heap resources.GPUHeap) string {
+	if !heap.Valid {
+		return "unavailable"
+	}
+	return formatGiB(heap.UsedBytes) + "/" + formatGiB(heap.TotalBytes) + " GiB"
+}
+
+func (model Model) renderResources(width int) string {
+	vram := formatGPUHeap(model.resources.GPU.VRAM)
+	gtt := formatGTT(model.resources.GPU.GTT)
+	ram := model.resources.RAM
+	if width >= 80 {
+		gpuLine := "GPU system · VRAM " + vram + " · GTT " + gtt
+		ramLine := "RAM —"
+		if ram.Valid {
+			ramLine = "RAM " + formatGiB(ram.UsedBytes) + "/" + formatGiB(ram.TotalBytes) + " GiB · available " + formatGiB(ram.AvailableBytes) + " GiB"
+		}
+		return renderResourceLine(gpuLine, width) + "\n" + renderResourceLine(ramLine, width)
+	}
+	text := "V —  G —  R —"
+	if width >= 52 {
+		vramText := "VRAM —"
+		if model.resources.GPU.VRAM.Valid {
+			vramText = "VRAM " + formatGiB(model.resources.GPU.VRAM.UsedBytes) + "/" + formatGiB(model.resources.GPU.VRAM.TotalBytes) + "G"
+		}
+		gttText := "GTT —"
+		if model.resources.GPU.GTT.Valid {
+			gttText = "GTT " + formatGiB(model.resources.GPU.GTT.UsedBytes) + "/" + formatGiB(model.resources.GPU.GTT.TotalBytes) + "G limit"
+		}
+		ramText := "RAM —"
+		if ram.Valid {
+			ramText = "RAM " + formatGiB(ram.UsedBytes) + "/" + formatGiB(ram.TotalBytes) + "G"
+		}
+		text = vramText + "  " + gttText + "  " + ramText
+	} else if width >= 28 {
+		vramText := "V —"
+		if model.resources.GPU.VRAM.Valid {
+			vramText = "V " + formatGiB(model.resources.GPU.VRAM.UsedBytes) + "/" + formatGiB(model.resources.GPU.VRAM.TotalBytes)
+		}
+		gttText := "G —"
+		if model.resources.GPU.GTT.Valid {
+			gttText = "G " + formatGiB(model.resources.GPU.GTT.UsedBytes) + "/" + formatGiB(model.resources.GPU.GTT.TotalBytes) + "L"
+		}
+		ramText := "R —"
+		if ram.Valid {
+			ramText = "R " + formatGiB(ram.UsedBytes) + "/" + formatGiB(ram.TotalBytes)
+		}
+		text = vramText + " " + gttText + " " + ramText
+	} else {
+		if model.resources.GPU.VRAM.Valid {
+			text = "V" + formatGiB(model.resources.GPU.VRAM.UsedBytes)
+		}
+		if model.resources.GPU.GTT.Valid {
+			text += " G" + formatGiB(model.resources.GPU.GTT.UsedBytes)
+		}
+		if ram.Valid {
+			text += " R" + formatGiB(ram.UsedBytes)
+		}
+	}
+	return renderResourceLine(text, width)
+}
+
+func renderResourceLine(text string, width int) string {
+	text = ansi.Truncate(text, width, "…")
+	return lipgloss.NewStyle().Width(width).Foreground(muted).Render(text)
+}
+
+func formatGiB(value uint64) string {
+	gib := float64(value) / float64(uint64(1)<<30)
+	if gib >= 10 && gib == float64(uint64(gib)) {
+		return fmt.Sprintf("%.0f", gib)
+	}
+	return strings.TrimSuffix(fmt.Sprintf("%.1f", gib), ".0")
+}
+
 func (model Model) renderTelemetry() string {
 	context := "ctx —"
 	if model.contextValid {
@@ -809,6 +1086,13 @@ func (model Model) renderTelemetry() string {
 	return strings.Join(parts, "  ")
 }
 
+func formatOptionalTokens(tokens int) string {
+	if tokens <= 0 {
+		return "unavailable"
+	}
+	return formatTokens(tokens) + " tokens"
+}
+
 func formatTokens(tokens int) string {
 	if tokens < 1000 {
 		return fmt.Sprintf("%d", tokens)
@@ -820,15 +1104,15 @@ func formatTokens(tokens int) string {
 }
 
 func (model Model) renderControls(width int) string {
-	controls := "↵ send  ^q quit"
+	controls := "↵ send  /help  ^q quit"
 	if width >= 40 {
-		controls = "enter send  ·  esc stop  ·  ^q quit"
+		controls = "enter send  ·  /help  ·  esc stop  ·  ^q quit"
 	}
 	if width >= 60 {
-		controls = "enter send  ·  alt+enter newline  ·  esc stop  ·  ctrl+q quit"
+		controls = "enter send · alt+enter newline · /help · esc stop · ctrl+q quit"
 	}
 	if width >= 80 {
-		controls = "enter send · alt+enter newline · pgup/dn scroll · esc stop · ^q quit"
+		controls = "enter send · alt+enter newline · pgup/dn scroll · /help · esc stop · ^q quit"
 	}
 	return lipgloss.NewStyle().Width(width).Foreground(muted).Render(controls)
 }
