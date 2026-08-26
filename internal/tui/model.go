@@ -90,7 +90,7 @@ var (
 
 func NewModel(runner Runner, modelName, workspace string) Model {
 	composer := textarea.New()
-	composer.Placeholder = "Ask Horizon Code to inspect the workspace…"
+	composer.Placeholder = ""
 	composer.Prompt = "❯ "
 	composer.ShowLineNumbers = false
 	composer.DynamicHeight = true
@@ -138,10 +138,12 @@ func (model Model) Init() tea.Cmd {
 func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
+		followLatest := model.viewport.AtBottom()
+		scrollPercent := model.viewport.ScrollPercent()
 		model.width = message.Width
 		model.height = message.Height
 		model.resize()
-		model.refreshTranscript()
+		model.refreshTranscriptAfterResize(followLatest, scrollPercent)
 		return model, nil
 	case tea.KeyPressMsg:
 		switch message.String() {
@@ -163,7 +165,16 @@ func (model Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if !model.busy && strings.TrimSpace(model.composer.Value()) != "" {
 				return model.submit()
 			}
+		case "pgup":
+			model.viewport.PageUp()
+			return model, nil
+		case "pgdown":
+			model.viewport.PageDown()
+			return model, nil
 		}
+		updatedComposer, composerCommand := model.composer.Update(message)
+		model.composer = updatedComposer
+		return model, composerCommand
 	case runStartedMsg:
 		model.runEvents = message.events
 		return model, waitForRun(message.events)
@@ -224,6 +235,7 @@ func (model Model) View() tea.View {
 	)
 	view := tea.NewView(content)
 	view.AltScreen = true
+	view.MouseMode = tea.MouseModeCellMotion
 	view.WindowTitle = "Horizon Code"
 	return view
 }
@@ -320,10 +332,12 @@ func (model *Model) applyAgentEvent(event agent.Event) {
 		arguments := safeText(event.Arguments)
 		model.activity = "running " + toolName
 		text := "⚙ " + toolName + "  running"
-		if toolName == "read_file" {
-			if target := toolPath(arguments); target != "" {
-				text = "⚙ " + toolName + "  " + target + "  …"
+		if target, compact := compactToolTarget(toolName, arguments); compact {
+			text = "⚙ " + toolName
+			if target != "" {
+				text += "  " + target
 			}
+			text += "  …"
 		} else {
 			if callID != "" {
 				text += "  [" + callID + "]"
@@ -342,8 +356,7 @@ func (model *Model) applyAgentEvent(event agent.Event) {
 			if model.blocks[index].kind != blockTool || callID == "" || model.blocks[index].callID != callID {
 				continue
 			}
-			if toolName == "read_file" {
-				target := toolPath(model.blocks[index].arguments)
+			if target, compact := compactToolTarget(toolName, model.blocks[index].arguments); compact {
 				status := firstResultLine(event.Text)
 				model.blocks[index].text = "⚙ " + toolName
 				if target != "" {
@@ -383,6 +396,14 @@ func (model *Model) resize() {
 }
 
 func (model *Model) refreshTranscript() {
+	model.refreshTranscriptAt(model.viewport.AtBottom(), model.viewport.YOffset(), -1)
+}
+
+func (model *Model) refreshTranscriptAfterResize(followLatest bool, scrollPercent float64) {
+	model.refreshTranscriptAt(followLatest, 0, scrollPercent)
+}
+
+func (model *Model) refreshTranscriptAt(followLatest bool, previousOffset int, scrollPercent float64) {
 	var rendered []string
 	width := max(8, model.viewport.Width()-4)
 	markdown, _ := glamour.NewTermRenderer(
@@ -398,12 +419,7 @@ func (model *Model) refreshTranscript() {
 			label := lipgloss.NewStyle().Foreground(accentBright).Bold(true).Render("YOU › ")
 			rendered = append(rendered, label+item.text)
 		case blockAssistant:
-			text := item.text
-			if markdown != nil {
-				if result, err := markdown.Render(item.text); err == nil {
-					text = strings.TrimSpace(result)
-				}
-			}
+			text := renderAssistantMarkdown(item.text, width, markdown)
 			label := lipgloss.NewStyle().Foreground(cyan).Bold(true).Render("◆ HORIZON")
 			rendered = append(rendered, label+"\n"+text)
 		case blockReasoning:
@@ -411,23 +427,254 @@ func (model *Model) refreshTranscript() {
 			text := lipgloss.NewStyle().Foreground(muted).Render(item.text)
 			rendered = append(rendered, label+"\n"+text)
 		case blockTool:
-			rendered = append(rendered, lipgloss.NewStyle().Foreground(cyan).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(accent).Padding(0, 1).Render(item.text))
+			toolText := ansi.Wordwrap(item.text, max(1, width-4), " ")
+			rendered = append(rendered, lipgloss.NewStyle().Foreground(cyan).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(accent).Padding(0, 1).Render(toolText))
 		case blockError:
 			rendered = append(rendered, lipgloss.NewStyle().Foreground(danger).Render(item.text))
 		}
 	}
 	model.viewport.SetContent(strings.Join(rendered, "\n\n"))
-	model.viewport.GotoBottom()
+	if followLatest {
+		model.viewport.GotoBottom()
+	} else if scrollPercent >= 0 {
+		model.viewport.GotoBottom()
+		maximumOffset := model.viewport.YOffset()
+		targetOffset := int(scrollPercent*float64(maximumOffset) + 0.5)
+		if targetOffset >= maximumOffset && maximumOffset > 0 {
+			targetOffset = maximumOffset - 1
+		}
+		model.viewport.SetYOffset(targetOffset)
+	} else {
+		model.viewport.SetYOffset(previousOffset)
+	}
 }
 
-func toolPath(arguments string) string {
-	var decoded struct {
-		Path string `json:"path"`
+func renderAssistantMarkdown(value string, width int, markdown *glamour.TermRenderer) string {
+	lines := strings.Split(safeText(value), "\n")
+	var rendered []string
+	var prose []string
+	flushProse := func() {
+		if len(prose) == 0 {
+			return
+		}
+		text := strings.Join(prose, "\n")
+		if markdown != nil {
+			if result, err := markdown.Render(text); err == nil {
+				text = strings.TrimSpace(result)
+			}
+		}
+		if strings.TrimSpace(text) != "" {
+			rendered = append(rendered, text)
+		}
+		prose = nil
 	}
-	if err := json.Unmarshal([]byte(arguments), &decoded); err != nil {
-		return ""
+
+	for index := 0; index < len(lines); index++ {
+		marker, markerLength, language, fenced := markdownFence(lines[index])
+		if !fenced {
+			prose = append(prose, lines[index])
+			continue
+		}
+		closing := -1
+		for candidate := index + 1; candidate < len(lines); candidate++ {
+			if closesMarkdownFence(lines[candidate], marker, markerLength) {
+				closing = candidate
+				break
+			}
+		}
+		if closing < 0 {
+			prose = append(prose, lines[index])
+			continue
+		}
+		flushProse()
+		rendered = append(rendered, renderCodeBlock(language, lines[index+1:closing], width))
+		index = closing
 	}
-	return safeText(decoded.Path)
+	flushProse()
+	return strings.Join(rendered, "\n\n")
+}
+
+func markdownFence(line string) (marker rune, length int, info string, ok bool) {
+	trimmed := strings.TrimLeft(line, " ")
+	if len(line)-len(trimmed) > 3 || trimmed == "" {
+		return 0, 0, "", false
+	}
+	marker = rune(trimmed[0])
+	if marker != '`' && marker != '~' {
+		return 0, 0, "", false
+	}
+	for length < len(trimmed) && rune(trimmed[length]) == marker {
+		length++
+	}
+	if length < 3 {
+		return 0, 0, "", false
+	}
+	info = strings.TrimSpace(trimmed[length:])
+	if marker == '`' && strings.ContainsRune(info, '`') {
+		return 0, 0, "", false
+	}
+	return marker, length, info, true
+}
+
+func closesMarkdownFence(line string, marker rune, minimumLength int) bool {
+	trimmed := strings.TrimLeft(line, " ")
+	if len(line)-len(trimmed) > 3 {
+		return false
+	}
+	length := 0
+	for length < len(trimmed) && rune(trimmed[length]) == marker {
+		length++
+	}
+	return length >= minimumLength && strings.TrimSpace(trimmed[length:]) == ""
+}
+
+func renderCodeBlock(language string, lines []string, width int) string {
+	contentWidth := max(1, width-2)
+	railStyle := lipgloss.NewStyle().Foreground(accent)
+	metadataStyle := lipgloss.NewStyle().Foreground(muted)
+	language = ansi.Truncate(compactOneLine(language), max(1, width-4), "…")
+	header := railStyle.Render("┌─")
+	if language != "" {
+		header += metadataStyle.Render(" " + language)
+	}
+	rendered := []string{header}
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	for _, line := range lines {
+		wrapped := strings.Split(ansi.Hardwrap(safeText(line), contentWidth, true), "\n")
+		for _, segment := range wrapped {
+			rendered = append(rendered, railStyle.Render("│ ")+segment)
+		}
+	}
+	rendered = append(rendered, railStyle.Render("└─"))
+	return strings.Join(rendered, "\n")
+}
+
+func compactToolTarget(toolName, arguments string) (string, bool) {
+	pathTarget := func(defaultPath string) (string, bool) {
+		var decoded struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil {
+			return "", false
+		}
+		if decoded.Path == "" {
+			decoded.Path = defaultPath
+		}
+		if decoded.Path == "" {
+			return "", false
+		}
+		return compactOneLine(decoded.Path), true
+	}
+	commandTarget := func() (string, bool) {
+		var decoded struct {
+			Program string   `json:"program"`
+			Args    []string `json:"args"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded.Program == "" {
+			return "", false
+		}
+		return compactOneLine(strings.Join(append([]string{decoded.Program}, decoded.Args...), " ")), true
+	}
+
+	switch toolName {
+	case "read_file", "create_file", "edit_file", "make_directory", "delete_path":
+		return pathTarget("")
+	case "list_files":
+		return pathTarget(".")
+	case "search_code":
+		var decoded struct {
+			Query string `json:"query"`
+			Path  string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded.Query == "" {
+			return "", false
+		}
+		if decoded.Path == "" {
+			decoded.Path = "."
+		}
+		return compactOneLine(decoded.Query + " · " + decoded.Path), true
+	case "apply_patch":
+		var decoded struct {
+			Patches []struct {
+				Path string `json:"path"`
+			} `json:"patches"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || len(decoded.Patches) == 0 || decoded.Patches[0].Path == "" {
+			return "", false
+		}
+		target := decoded.Patches[0].Path
+		if len(decoded.Patches) > 1 {
+			target += fmt.Sprintf(" +%d", len(decoded.Patches)-1)
+		}
+		return compactOneLine(target), true
+	case "move_path":
+		var decoded struct {
+			Source      string `json:"source"`
+			Destination string `json:"destination"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded.Source == "" || decoded.Destination == "" {
+			return "", false
+		}
+		return compactOneLine(decoded.Source + " → " + decoded.Destination), true
+	case "run_command", "exec_command":
+		return commandTarget()
+	case "shell":
+		var decoded struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded.Command == "" {
+			return "", false
+		}
+		return compactOneLine(decoded.Command), true
+	case "background_process":
+		var decoded struct {
+			Operation string   `json:"operation"`
+			ID        string   `json:"id"`
+			Program   string   `json:"program"`
+			Args      []string `json:"args"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded.Operation == "" {
+			return "", false
+		}
+		target := decoded.ID
+		if decoded.Operation == "start" && decoded.Program != "" {
+			target = strings.Join(append([]string{decoded.Program}, decoded.Args...), " ")
+		}
+		if target == "" {
+			return compactOneLine(decoded.Operation), true
+		}
+		return compactOneLine(decoded.Operation + " · " + target), true
+	case "git_diff":
+		var decoded struct {
+			Path   string `json:"path"`
+			Staged bool   `json:"staged"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil {
+			return "", false
+		}
+		mode := "working"
+		if decoded.Staged {
+			mode = "staged"
+		}
+		if decoded.Path == "" {
+			return mode, true
+		}
+		return compactOneLine(mode + " · " + decoded.Path), true
+	default:
+		return "", false
+	}
+}
+
+func compactOneLine(value string) string {
+	const maxRunes = 120
+	value = strings.Join(strings.Fields(safeText(value)), " ")
+	runes := []rune(value)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes-1]) + "…"
+	}
+	return value
 }
 
 func firstResultLine(result string) string {
@@ -452,7 +699,16 @@ func prettyJSON(value string) string {
 }
 
 func safeText(value string) string {
-	return ansi.Strip(value)
+	value = ansi.Strip(value)
+	return strings.Map(func(character rune) rune {
+		if character == '\n' || character == '	' {
+			return character
+		}
+		if character < 0x20 || character == 0x7f || (character >= 0x80 && character <= 0x9f) {
+			return -1
+		}
+		return character
+	}, value)
 }
 
 func toolResultPreview(value string) string {
@@ -570,6 +826,9 @@ func (model Model) renderControls(width int) string {
 	}
 	if width >= 60 {
 		controls = "enter send  ·  alt+enter newline  ·  esc stop  ·  ctrl+q quit"
+	}
+	if width >= 80 {
+		controls = "enter send · alt+enter newline · pgup/dn scroll · esc stop · ^q quit"
 	}
 	return lipgloss.NewStyle().Width(width).Foreground(muted).Render(controls)
 }
