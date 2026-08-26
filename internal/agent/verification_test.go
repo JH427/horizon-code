@@ -23,6 +23,16 @@ func (tool resultTool) Run(context.Context, []byte) (tools.Result, error) {
 	return tool.result, nil
 }
 
+type failedMutationTool struct{}
+
+func (failedMutationTool) Definition() model.Tool {
+	return model.Tool{Name: "edit_file", Parameters: map[string]any{"type": "object"}}
+}
+
+func (failedMutationTool) Run(context.Context, []byte) (tools.Result, error) {
+	return tools.Result{Content: "COMMAND_RESULT\nexit_code: 1", Changed: true}, errors.New("command exited after modifying the workspace")
+}
+
 type verificationModel struct {
 	step     int
 	requests []model.Request
@@ -73,6 +83,24 @@ func TestEngineRequiresVerificationAfterChange(t *testing.T) {
 		if event.Kind == EventAssistantDelta && strings.Contains(event.Text, "Done without tests") {
 			t.Fatalf("premature completion leaked to display events: %#v", events)
 		}
+	}
+}
+
+func TestEngineRequiresVerificationAfterFailedMutatingTool(t *testing.T) {
+	fake := &verificationModel{}
+	engine := NewEngine(fake, []Tool{
+		failedMutationTool{},
+		resultTool{name: "run_command", result: tools.Result{Content: "COMMAND_RESULT", Verified: true}},
+	}, 6)
+	answer, err := engine.Run(context.Background(), "change it with the shell", nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if answer != "Implemented and verified." {
+		t.Fatalf("answer = %q, want verified completion", answer)
+	}
+	if len(fake.requests) != 4 {
+		t.Fatalf("requests = %d, want verification repair loop", len(fake.requests))
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -35,7 +36,16 @@ type appConfig struct {
 	prompt        string
 	startup       time.Duration
 	shutdown      time.Duration
+	capability    capabilityMode
 }
+
+type capabilityMode string
+
+const (
+	capabilitySafe      capabilityMode = "safe"
+	capabilityWorkspace capabilityMode = "workspace"
+	capabilityOperator  capabilityMode = "operator"
+)
 
 func main() {
 	config, err := parseConfig(os.Args[1:])
@@ -65,6 +75,7 @@ func parseConfig(arguments []string) (appConfig, error) {
 	}
 	flags := flag.NewFlagSet("horizon-code", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	capability := string(capabilitySafe)
 	flags.StringVar(&config.serverCommand, "server-command", serverCommand, "owned inference server launcher")
 	flags.StringVar(&config.baseURL, "base-url", "http://127.0.0.1:8080/v1", "OpenAI-compatible API base URL")
 	flags.StringVar(&config.healthURL, "health-url", "http://127.0.0.1:8080/health", "inference readiness URL")
@@ -74,8 +85,15 @@ func parseConfig(arguments []string) (appConfig, error) {
 	flags.StringVar(&config.prompt, "prompt", "", "run one headless prompt and exit")
 	flags.DurationVar(&config.startup, "startup-timeout", 10*time.Minute, "inference readiness timeout")
 	flags.DurationVar(&config.shutdown, "shutdown-timeout", 30*time.Second, "inference shutdown timeout")
+	flags.StringVar(&capability, "capability", capability, "tool capability: safe, workspace, or operator")
 	if err := flags.Parse(arguments); err != nil {
 		return appConfig{}, err
+	}
+	config.capability = capabilityMode(capability)
+	switch config.capability {
+	case capabilitySafe, capabilityWorkspace, capabilityOperator:
+	default:
+		return appConfig{}, fmt.Errorf("unknown capability %q; expected safe, workspace, or operator", capability)
 	}
 	workspace, err := filepath.Abs(config.workspace)
 	if err != nil {
@@ -126,6 +144,7 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 		StartupTimeout:  config.startup,
 		ShutdownTimeout: config.shutdown,
 	}, healthClient)
+	fmt.Fprintf(errorOutput, "Capability: %s\n", config.capability)
 	fmt.Fprintf(errorOutput, "Starting %s…\n", config.model)
 	if err := manager.Start(ctx); err != nil {
 		return err
@@ -158,7 +177,14 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 	if err := modelClient.Verify(verifyContext); err != nil {
 		return fmt.Errorf("verify served model: %w", err)
 	}
-	engine := agent.NewEngine(modelClient, workspaceTools(config.workspace, isGitWorkspace(config.workspace)), 16)
+	availableTools := workspaceTools(config.workspace, isGitWorkspace(config.workspace), config.capability)
+	defer func() {
+		if err := closeToolResources(availableTools); err != nil {
+			fmt.Fprintln(errorOutput, "tool cleanup error:", err)
+		}
+	}()
+	engine := agent.NewEngineWithBudget(modelClient, availableTools, agentBudget(config.capability))
+	engine.SetCapabilityPolicy(capabilityInstructions(config.capability))
 	instructionsFound, err := configureWorkspaceInstructions(engine, config.workspace)
 	if err != nil {
 		return err
@@ -202,6 +228,7 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 
 	interfaceModel := tui.NewModel(recordedEngine, config.model, config.workspace)
 	interfaceModel.SetServedContext(modelClient.ContextSize())
+	interfaceModel.SetCapability(string(config.capability))
 	program := tea.NewProgram(interfaceModel, tea.WithContext(ctx))
 	_, err = program.Run()
 	return err
@@ -223,7 +250,43 @@ func configureWorkspaceInstructions(target workspaceInstructionTarget, workspace
 	return true, nil
 }
 
-func workspaceTools(workspace string, includeGit bool) []agent.Tool {
+func capabilityInstructions(capability capabilityMode) string {
+	switch capability {
+	case capabilityWorkspace:
+		return "Workspace autonomy is enabled. Use apply_patch and path tools for filesystem changes, exec_command for broad structured project commands, and background_process for managed long-running jobs. The dedicated shell tool is not exposed, but direct executables, interpreters, and wrappers are not sandboxed and may have all permissions of the current user. Arbitrary command execution conservatively marks the workspace changed even when used for inspection. Use run_command, or exec_command with an accepted build/test/static-check program, for hardened verification. Keep task-owned writes inside the selected workspace and stop background jobs when no longer needed."
+	case capabilityOperator:
+		return "Operator autonomy is explicitly enabled. You may use apply_patch and path tools, exec_command, the unrestricted shell, network access, package managers, Git writes, and background_process when needed to finish the task. Arbitrary exec_command, shell, and background execution conservatively marks the workspace changed, including inspection. Shell and background_process cannot self-certify verification: use run_command, or exec_command with an accepted build/test/static-check program, after the latest mutation. Preserve user work, avoid needless destructive actions, and stop every background job when finished."
+	default:
+		return ""
+	}
+}
+
+func agentBudget(capability capabilityMode) agent.Budget {
+	budget := agent.Budget{
+		MaxSteps: 16, MaxToolCalls: 32, MaxRepairs: 8,
+		MaxToolResultBytes: 128 << 10, MaxContextTokens: 48 * 1024,
+		CompactionKeepRecentRounds: 4, MaxCompactionSummaryBytes: 8 << 10,
+	}
+	switch capability {
+	case capabilityWorkspace:
+		budget.MaxSteps = 24
+		budget.MaxToolCalls = 64
+		budget.MaxRepairs = 12
+		budget.MaxToolResultBytes = 256 << 10
+		budget.CompactionKeepRecentRounds = 6
+		budget.MaxCompactionSummaryBytes = 12 << 10
+	case capabilityOperator:
+		budget.MaxSteps = 32
+		budget.MaxToolCalls = 96
+		budget.MaxRepairs = 16
+		budget.MaxToolResultBytes = 384 << 10
+		budget.CompactionKeepRecentRounds = 8
+		budget.MaxCompactionSummaryBytes = 16 << 10
+	}
+	return budget
+}
+
+func workspaceTools(workspace string, includeGit bool, capability capabilityMode) []agent.Tool {
 	available := []agent.Tool{
 		tools.NewListFiles(workspace, 200),
 		tools.NewReadFile(workspace, 500),
@@ -235,7 +298,43 @@ func workspaceTools(workspace string, includeGit bool) []agent.Tool {
 	if includeGit {
 		available = append(available, tools.NewGitDiff(workspace, 128<<10))
 	}
+	if capability == capabilitySafe {
+		return available
+	}
+
+	available = append(available,
+		tools.NewApplyPatch(workspace, 4<<20),
+		tools.NewMakeDirectory(workspace),
+		tools.NewMovePath(workspace),
+		tools.NewDeletePath(workspace),
+	)
+	if capability == capabilityOperator {
+		available = append(available,
+			tools.NewOperatorExecCommand(workspace, 128<<10, 10*time.Minute),
+			tools.NewOperatorBackgroundProcess(workspace, 128<<10, 30*time.Minute),
+			tools.NewShell(workspace, 128<<10, 10*time.Minute),
+		)
+		return available
+	}
+	available = append(available,
+		tools.NewExecCommand(workspace, 128<<10, 10*time.Minute),
+		tools.NewBackgroundProcess(workspace, 128<<10, 30*time.Minute),
+	)
 	return available
+}
+
+func closeToolResources(available []agent.Tool) error {
+	var closeErrors []error
+	for _, tool := range available {
+		closer, ok := tool.(interface{ Close() error })
+		if !ok {
+			continue
+		}
+		if err := closer.Close(); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close tool %s: %w", tool.Definition().Name, err))
+		}
+	}
+	return errors.Join(closeErrors...)
 }
 
 func isGitWorkspace(workspace string) bool {

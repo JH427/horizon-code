@@ -120,17 +120,31 @@ func (tool *RunCommand) Run(ctx context.Context, rawArguments []byte) (Result, e
 	started := time.Now()
 	err = command.Run()
 	duration := time.Since(started)
+	changed := command.Process != nil && arguments.Program != "git"
 	content := fmt.Sprintf(
 		"COMMAND_RESULT\nprogram: %s\nargs: %q\nexit_code: %d\nduration: %s\ntruncated: %t\noutput:\n%s",
 		arguments.Program, arguments.Arguments, exitCode(err), duration.Round(time.Millisecond), output.truncated, strings.TrimSpace(output.String()),
 	)
 	if commandContext.Err() != nil {
-		return Result{}, fmt.Errorf("run_command cancelled or timed out: %w\n%s", commandContext.Err(), content)
+		return Result{Content: content, Changed: changed}, fmt.Errorf("run_command cancelled or timed out: %w\n%s", commandContext.Err(), content)
 	}
 	if err != nil {
-		return Result{}, fmt.Errorf("run_command failed: %w\n%s", err, content)
+		return Result{Content: content, Changed: changed}, fmt.Errorf("run_command failed: %w\n%s", err, content)
 	}
-	return Result{Content: content, Verified: programProvidesVerification(arguments.Program, arguments.Arguments)}, nil
+	verified := programProvidesVerification(arguments.Program, arguments.Arguments)
+	if verified {
+		if err := validateVerificationOutput(arguments.Program, output.String()); err != nil {
+			return Result{Content: content, Changed: changed}, err
+		}
+	}
+	return Result{Content: content, Changed: changed, Verified: verified}, nil
+}
+
+func validateVerificationOutput(program, output string) error {
+	if program == "go" && strings.Contains(output, "matched no packages") {
+		return errors.New("run_command did not verify the workspace: go matched no packages")
+	}
+	return nil
 }
 
 func programProvidesVerification(program string, arguments []string) bool {
@@ -219,10 +233,13 @@ func validateCommandProvidesVerification(program string, arguments []string) err
 		case "-h", "--help", "-V", "--version":
 			return fmt.Errorf("run_command rejects informational option %q because it does not verify the workspace", argument)
 		}
+		if argument == "--if-present" || strings.HasPrefix(argument, "--if-present=") {
+			return fmt.Errorf("run_command rejects npm option %q because a missing script can exit successfully without verification", argument)
+		}
 	}
 	if program == "go" {
 		for _, argument := range arguments[1:] {
-			if argument == "-n" {
+			if argument == "-n" || strings.HasPrefix(argument, "-n=") {
 				return errors.New("run_command rejects go -n because it prints commands without executing verification")
 			}
 		}
@@ -230,7 +247,7 @@ func validateCommandProvidesVerification(program string, arguments []string) err
 	if program == "pytest" {
 		for _, argument := range arguments {
 			switch argument {
-			case "--collect-only", "--collectonly", "--co", "--setup-plan", "--fixtures", "--markers":
+			case "--collect-only", "--collectonly", "--co", "--setup-only", "--setup-plan", "--fixtures", "--fixtures-per-test", "--funcargs", "--markers":
 				return fmt.Errorf("run_command rejects pytest option %q because it does not execute tests", argument)
 			}
 		}

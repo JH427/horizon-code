@@ -41,9 +41,10 @@ type block struct {
 }
 
 type Model struct {
-	runner    Runner
-	modelName string
-	workspace string
+	runner     Runner
+	modelName  string
+	workspace  string
+	capability string
 	// Telemetry stays presentation-only, with no agent event schema dependency.
 	contextTokens    int
 	contextLimit     int
@@ -118,12 +119,16 @@ func NewModel(runner Runner, modelName, workspace string) Model {
 	return Model{
 		runner: runner, modelName: modelName, workspace: workspace,
 		viewport: view, composer: composer,
-		activity: "ready",
+		activity: "ready", capability: "safe",
 	}
 }
 
 func (model *Model) SetServedContext(tokens int) {
 	model.servedContext = tokens
+}
+
+func (model *Model) SetCapability(capability string) {
+	model.capability = safeText(capability)
 }
 
 func (model Model) Init() tea.Cmd {
@@ -479,6 +484,24 @@ func (model Model) renderHeader(width int) string {
 		brandText = "◆ HC"
 	}
 	brand := lipgloss.NewStyle().Foreground(accentBright).Bold(true).Render(brandText)
+	capabilityText := strings.ToUpper(model.capability)
+	if width < 40 {
+		switch model.capability {
+		case "operator":
+			capabilityText = "OP"
+		case "workspace":
+			capabilityText = "WS"
+		default:
+			capabilityText = "S"
+		}
+	}
+	capabilityColor := muted
+	if model.capability == "workspace" {
+		capabilityColor = accentBright
+	} else if model.capability == "operator" {
+		capabilityColor = danger
+	}
+	capability := lipgloss.NewStyle().Foreground(capabilityColor).Bold(true).Render(capabilityText)
 	stateColor := cyan
 	if model.busy {
 		stateColor = accentBright
@@ -488,10 +511,10 @@ func (model Model) renderHeader(width int) string {
 	}
 	activity := lipgloss.NewStyle().Foreground(stateColor).Render("● " + model.activity)
 
-	left := brand + "  " + activity
+	left := brand + " " + capability + "  " + activity
 	right := ""
 	if width >= 80 {
-		left = brand + lipgloss.NewStyle().Foreground(muted).Render("  "+model.workspace) + "  " + activity
+		left = brand + " " + capability + lipgloss.NewStyle().Foreground(muted).Render("  "+model.workspace) + "  " + activity
 		right = lipgloss.NewStyle().Foreground(muted).Render(model.modelName + "  " + model.renderTelemetry())
 	} else if width >= 56 {
 		right = lipgloss.NewStyle().Foreground(muted).Render(model.modelName)

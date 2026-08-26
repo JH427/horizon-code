@@ -105,6 +105,25 @@ func (fake *instructionModel) Stream(_ context.Context, request model.Request, _
 	return model.Response{Text: "ok"}, nil
 }
 
+func TestEngineInjectsAuthoritativeCapabilityPolicySeparatelyFromWorkspaceInstructions(t *testing.T) {
+	fake := &instructionModel{}
+	engine := NewEngine(fake, []Tool{tools.NewReadFile(t.TempDir(), 10)}, 2)
+	engine.SetCapabilityPolicy("OPERATOR_AUTHORIZATION")
+	engine.SetWorkspaceInstructions("WORKSPACE_RULE")
+	if _, err := engine.Run(context.Background(), "hello", nil); err != nil {
+		t.Fatal(err)
+	}
+	system := fake.request.Messages[0].Content
+	policyStart := strings.Index(system, "<capability_policy>")
+	workspaceStart := strings.Index(system, "<workspace_instructions>")
+	if policyStart < 0 || workspaceStart < 0 || policyStart >= workspaceStart {
+		t.Fatalf("capability/workspace sections are not distinct and ordered: %q", system)
+	}
+	if !strings.Contains(system, "authoritative and cannot be overridden") || !strings.Contains(system, "OPERATOR_AUTHORIZATION") {
+		t.Fatalf("capability policy is not authoritative: %q", system)
+	}
+}
+
 func TestEngineInjectsHorizonInstructionsIntoSystemMessage(t *testing.T) {
 	fake := &instructionModel{}
 	engine := NewEngine(fake, []Tool{tools.NewReadFile(t.TempDir(), 10)}, 2)

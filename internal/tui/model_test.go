@@ -59,6 +59,16 @@ func TestNewModelStartsWithoutTranscriptFluff(t *testing.T) {
 	}
 }
 
+func TestCapabilityModeIsAlwaysVisibleInWideFlightDeck(t *testing.T) {
+	model := NewModel(noopRunner{}, "qwen38-27b", "/workspace")
+	model.SetCapability("operator")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	view := ansi.Strip(updated.(Model).View().Content)
+	if !strings.Contains(view, "OPERATOR") {
+		t.Fatalf("operator capability is not visible in flight deck:\n%s", view)
+	}
+}
+
 func TestThemeUsesOmarchyTerminalPalette(t *testing.T) {
 	want := []color.Color{
 		lipgloss.Color("4"),

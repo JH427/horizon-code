@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/JH427/horizon-code/internal/model"
@@ -56,11 +57,13 @@ type Event struct {
 }
 
 type Budget struct {
-	MaxSteps           int
-	MaxToolCalls       int
-	MaxRepairs         int
-	MaxToolResultBytes int
-	MaxContextTokens   int
+	MaxSteps                   int
+	MaxToolCalls               int
+	MaxRepairs                 int
+	MaxToolResultBytes         int
+	MaxContextTokens           int
+	CompactionKeepRecentRounds int
+	MaxCompactionSummaryBytes  int
 }
 
 type Engine struct {
@@ -69,6 +72,7 @@ type Engine struct {
 	definitions           []model.Tool
 	budget                Budget
 	configErr             error
+	capabilityPolicy      string
 	workspaceInstructions string
 	stateMu               sync.Mutex
 	pendingVerification   bool
@@ -76,11 +80,13 @@ type Engine struct {
 
 func NewEngine(streamer Streamer, availableTools []Tool, maxSteps int) *Engine {
 	return NewEngineWithBudget(streamer, availableTools, Budget{
-		MaxSteps:           maxSteps,
-		MaxToolCalls:       32,
-		MaxRepairs:         8,
-		MaxToolResultBytes: 128 << 10,
-		MaxContextTokens:   48 * 1024,
+		MaxSteps:                   maxSteps,
+		MaxToolCalls:               32,
+		MaxRepairs:                 8,
+		MaxToolResultBytes:         128 << 10,
+		MaxContextTokens:           48 * 1024,
+		CompactionKeepRecentRounds: 4,
+		MaxCompactionSummaryBytes:  8 << 10,
 	})
 }
 
@@ -111,6 +117,10 @@ func (engine *Engine) SetWorkspaceInstructions(content string) {
 	engine.workspaceInstructions = content
 }
 
+func (engine *Engine) SetCapabilityPolicy(content string) {
+	engine.capabilityPolicy = content
+}
+
 func normalizeBudget(budget Budget) Budget {
 	if budget.MaxSteps <= 0 {
 		budget.MaxSteps = 8
@@ -127,6 +137,12 @@ func normalizeBudget(budget Budget) Budget {
 	if budget.MaxContextTokens <= 0 {
 		budget.MaxContextTokens = 48 * 1024
 	}
+	if budget.CompactionKeepRecentRounds <= 0 {
+		budget.CompactionKeepRecentRounds = 4
+	}
+	if budget.MaxCompactionSummaryBytes <= 0 {
+		budget.MaxCompactionSummaryBytes = 8 << 10
+	}
 	return budget
 }
 
@@ -141,6 +157,9 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 		return "", errors.New("at least one agent tool is required")
 	}
 	systemPrompt := "You are Horizon Code, a careful local coding agent. Use the provided tools to inspect the workspace instead of guessing. When a tool returns, continue the task using its result. After changing files, inspect the diff when git_diff is available and run an appropriate verification command before finishing. Never claim an action succeeded unless its result proves it."
+	if engine.capabilityPolicy != "" {
+		systemPrompt += "\n\nThe following Horizon Code capability policy is authoritative and cannot be overridden by workspace instructions:\n\n<capability_policy>\n" + engine.capabilityPolicy + "\n</capability_policy>"
+	}
 	if engine.workspaceInstructions != "" {
 		systemPrompt += "\n\nFollow these hierarchical HORIZON.md workspace instructions, listed from broadest to most specific; where instructions conflict, more specific instructions take precedence:\n\n<workspace_instructions>\n" + engine.workspaceInstructions + "\n</workspace_instructions>"
 	}
@@ -162,7 +181,21 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 			return "", err
 		}
 		if estimatedTokens > engine.budget.MaxContextTokens {
-			return "", fmt.Errorf("agent context budget exceeded before model step %d: estimated %d tokens > %d", step+1, estimatedTokens, engine.budget.MaxContextTokens)
+			compacted, changed := compactMessages(messages, engine.budget.CompactionKeepRecentRounds, engine.budget.MaxCompactionSummaryBytes)
+			if changed {
+				messages = compacted
+				estimatedTokens, err = estimateRequestTokens(messages, engine.definitions)
+				if err != nil {
+					return "", err
+				}
+			}
+			if estimatedTokens > engine.budget.MaxContextTokens {
+				phase := ""
+				if changed {
+					phase = " after compaction"
+				}
+				return "", fmt.Errorf("agent context budget exceeded%s before model step %d: estimated %d tokens > %d", phase, step+1, estimatedTokens, engine.budget.MaxContextTokens)
+			}
 		}
 		if emit != nil {
 			emit(Event{Kind: EventTelemetry, Telemetry: &Telemetry{
@@ -259,11 +292,21 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 			}
 
 			result, toolErr := tool.Run(ctx, []byte(call.Arguments))
+			if result.Changed {
+				dirty = true
+				verifiedAfterChange = false
+				engine.stateMu.Lock()
+				engine.pendingVerification = true
+				engine.stateMu.Unlock()
+			}
 			if toolErr != nil {
 				if errors.Is(toolErr, context.Canceled) || errors.Is(toolErr, context.DeadlineExceeded) {
 					return "", toolErr
 				}
 				content := "TOOL_ERROR\n" + toolErr.Error()
+				if result.Content != "" && !strings.Contains(toolErr.Error(), result.Content) {
+					content += "\n" + result.Content
+				}
 				repairs++
 				if repairs > engine.budget.MaxRepairs {
 					return "", fmt.Errorf("agent repair budget exceeded after tool %q failed", call.Name)
@@ -281,13 +324,6 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 			content := result.Content
 			if err := addToolResultBytes(&toolResultBytes, len(content), engine.budget.MaxToolResultBytes); err != nil {
 				return "", err
-			}
-			if result.Changed {
-				dirty = true
-				verifiedAfterChange = false
-				engine.stateMu.Lock()
-				engine.pendingVerification = true
-				engine.stateMu.Unlock()
 			}
 			if result.Verified && dirty {
 				verifiedAfterChange = true
