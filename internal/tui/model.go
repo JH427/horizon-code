@@ -48,6 +48,7 @@ type block struct {
 }
 
 type Model struct {
+	runContext      context.Context
 	runner          Runner
 	modelName       string
 	workspace       string
@@ -102,6 +103,10 @@ var (
 )
 
 func NewModel(runner Runner, modelName, workspace string) Model {
+	return NewModelWithContext(context.Background(), runner, modelName, workspace)
+}
+
+func NewModelWithContext(ctx context.Context, runner Runner, modelName, workspace string) Model {
 	composer := textarea.New()
 	composer.Placeholder = ""
 	composer.Prompt = "❯ "
@@ -130,7 +135,7 @@ func NewModel(runner Runner, modelName, workspace string) Model {
 	view.SoftWrap = true
 	view.FillHeight = true
 	return Model{
-		runner: runner, modelName: compactOneLine(modelName), workspace: compactOneLine(workspace),
+		runContext: ctx, runner: runner, modelName: compactOneLine(modelName), workspace: compactOneLine(workspace),
 		viewport: view, composer: composer,
 		activity: "ready", capability: "safe",
 	}
@@ -305,13 +310,14 @@ func (model Model) submit() (tea.Model, tea.Cmd) {
 	model.blocks = append(model.blocks, block{kind: blockUser, text: prompt})
 	model.busy = true
 	model.activity = "thinking"
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(model.runContext)
 	model.cancel = cancel
 	events := make(chan runUpdate, 64)
 	model.refreshTranscript()
 
 	command := func() tea.Msg {
 		go func() {
+			defer cancel()
 			_, err := model.runner.Run(ctx, prompt, func(event agent.Event) {
 				eventCopy := event
 				select {
@@ -319,7 +325,12 @@ func (model Model) submit() (tea.Model, tea.Cmd) {
 				case <-ctx.Done():
 				}
 			})
-			events <- runUpdate{err: err, done: true}
+			// A cancelled turn still needs a terminal update for Esc / /quit.
+			// Application shutdown, however, may have removed the consumer.
+			select {
+			case events <- runUpdate{err: err, done: true}:
+			case <-model.runContext.Done():
+			}
 			close(events)
 		}()
 		return runStartedMsg{events: events}

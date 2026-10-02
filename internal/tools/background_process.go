@@ -308,6 +308,22 @@ func (process *managedProcess) snapshot() (string, bool, bool) {
 	return content, exited && waitErr == nil && !timedOut, exited
 }
 
+// HasRunningProcesses participates in the agent's verification gate. Purpose
+// labels are not security boundaries: inspect jobs can also change the workspace.
+func (tool *BackgroundProcess) HasRunningProcesses() bool {
+	tool.mu.Lock()
+	defer tool.mu.Unlock()
+	for _, process := range tool.processes {
+		process.mu.Lock()
+		running := !process.exited
+		process.mu.Unlock()
+		if running {
+			return true
+		}
+	}
+	return false
+}
+
 func (tool *BackgroundProcess) Close() error {
 	tool.mu.Lock()
 	if tool.closed {

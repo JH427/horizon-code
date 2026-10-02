@@ -27,13 +27,15 @@ internal/session/   local event/session persistence
 - Typed tool registry with bounded read/search/edit tools, atomic multi-file patches, path operations, command execution, managed background processes, and optional Git support.
 - Exact-match atomic edits and new-file creation confined to the selected workspace.
 - `run_command` has no shell and accepts only selected build, test, static-check, and read-only Git commands.
-- Workspace-changing tools force a successful verification command before the agent may finish.
-- Pending verification survives cancellation into the next turn; explicit step, tool-call, repair, tool-result, and 48K active-context budgets bound each turn.
+- Workspace-changing tools force a successful verification command before the agent may finish. Every managed background job, including `inspect` jobs, must exit or be stopped **before** that verification starts; a job that exits during the check still requires a fresh check.
+- Conversation requests, accepted answers, and tool evidence persist across turns in the same process. Interrupted tool rounds receive explicit unknown-result placeholders so follow-up requests never contain unpaired calls. This is not automatic session restoration from disk.
+- Pending verification survives cancellation into the next turn; step, tool-call, repair, and tool-result budgets reset each turn, while the 48K active-context budget also covers retained conversation history.
 - Borderless Bubble Tea “flight deck” with a compact activity/telemetry rail, dense semantic transcript, multiline composer, verification notices, cancellation, and local slash commands.
 - Live measured Linux resource rail: host RAM used/available/total plus separate system-wide AMD VRAM used/total and GTT allocated/limit counters. GPU allocation is not mislabeled as per-process/model usage.
 - Omarchy-native presentation: semantic ANSI palette slots and the terminal's default background, so active Omarchy terminal themes control Horizon Code without app-specific theme files.
 - Visible streamed Qwen reasoning plus tool call IDs, JSON arguments, bounded inline result previews, and failures; complete results remain in private session logs.
-- Append-only JSONL sessions and deterministic fake-model/HTTP integration tests.
+- Append-only JSONL sessions and deterministic fake-model/HTTP integration tests. Recording failures cancel the active turn, suppress unrecorded events, and reject further turns until restart; errors are never silently discarded.
+- Interactive turns inherit application cancellation. Shutdown cancels and joins the runner before closing its journal, tools, and owned inference server.
 - Hierarchical `HORIZON.md` workspace instructions, discovered from filesystem root through the selected workspace, source-labeled parent first, capped at 64 KiB, and injected into the system message.
 - Exact llama.cpp live/final telemetry: cumulative decode tok/s, prompt speed, generated tokens, active 48K context pressure, and the verified 262K served window. Pre-response client estimates are visibly marked with `~` and never presented as exact.
 - Strict single-value tool JSON, validated streamed tool metadata, usage parsing, and fail-closed handling for truncated streams.
@@ -105,7 +107,7 @@ horizon-code --capability workspace
 horizon-code --capability operator
 ```
 
-`safe` remains the default. `workspace` keeps command working directories inside the selected workspace and omits the dedicated shell tool, but it is not a security boundary or operating-system sandbox: invoked executables, interpreters, and wrappers can still access resources allowed to the current user. `operator` adds direct shell syntax and should be selected only when the model is authorized to act with the user's shell permissions. Arbitrary foreground, shell, and background execution conservatively marks verification pending—even when labeled as inspection. Shell and background jobs cannot self-certify: completion requires a later hardened `run_command` or an `exec_command` accepted as a build, test, or static check. Output, execution time, and process groups remain bounded; Horizon Code stops managed background jobs on exit.
+`safe` remains the default. `workspace` keeps command working directories inside the selected workspace and omits the dedicated shell tool, but it is not a security boundary or operating-system sandbox: invoked executables, interpreters, and wrappers can still access resources allowed to the current user. `operator` adds direct shell syntax and should be selected only when the model is authorized to act with the user's shell permissions. Arbitrary foreground, shell, and background execution conservatively marks verification pending—even when labeled as inspection. Shell and background jobs cannot self-certify: completion requires a later hardened `run_command` or an `exec_command` accepted as a build, test, or static check. Output, execution time, and process groups remain bounded; Horizon Code stops managed background jobs on exit. Long-running watchers/servers cannot remain active through a completed verified turn: poll or stop them, then run a fresh verification. Purpose labels do not make executable jobs read-only.
 
 A bounded headless prompt is available for explicit smoke testing:
 

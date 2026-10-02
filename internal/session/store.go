@@ -48,10 +48,20 @@ type Runner interface {
 	Run(context.Context, string, func(agent.Event)) (string, error)
 }
 
+type recordAppender interface {
+	Append(Record) error
+}
+
 type RecordingRunner struct {
 	runner Runner
-	store  *Store
+	store  recordAppender
 	turns  atomic.Uint64
+
+	mu           sync.Mutex
+	closed       bool
+	recordingErr error
+	activeCancel context.CancelCauseFunc
+	activeDone   chan struct{}
 }
 
 func NewStore(root string, metadata Metadata) (*Store, error) {
@@ -133,42 +143,119 @@ func Replay(path string) ([]Record, error) {
 	}
 }
 
-func NewRecordingRunner(runner Runner, store *Store) *RecordingRunner {
+func NewRecordingRunner(runner Runner, store recordAppender) *RecordingRunner {
 	return &RecordingRunner{runner: runner, store: store}
 }
 
 func (runner *RecordingRunner) Run(ctx context.Context, prompt string, emit func(agent.Event)) (string, error) {
-	turnID := fmt.Sprintf("turn-%d", runner.turns.Add(1))
-	if err := runner.store.Append(Record{Kind: "turn_started", TurnID: turnID, Text: prompt}); err != nil {
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	answer, err := runner.runner.Run(ctx, prompt, func(event agent.Event) {
-		record := Record{
-			Kind:      string(event.Kind),
-			TurnID:    turnID,
-			Text:      event.Text,
-			ToolName:  event.ToolName,
-			CallID:    event.CallID,
-			Arguments: event.Arguments,
-			Telemetry: event.Telemetry,
+	runner.mu.Lock()
+	if runner.closed {
+		runner.mu.Unlock()
+		return "", errors.New("recording runner is closed")
+	}
+	if runner.recordingErr != nil {
+		err := runner.recordingErr
+		runner.mu.Unlock()
+		return "", err
+	}
+	if runner.activeDone != nil {
+		runner.mu.Unlock()
+		return "", errors.New("recording turn already running")
+	}
+	turnContext, cancel := context.WithCancelCause(ctx)
+	done := make(chan struct{})
+	runner.activeCancel, runner.activeDone = cancel, done
+	runner.mu.Unlock()
+	defer func() {
+		cancel(nil)
+		runner.mu.Lock()
+		runner.activeCancel, runner.activeDone = nil, nil
+		close(done)
+		runner.mu.Unlock()
+	}()
+
+	failRecording := func(err error) {
+		runner.mu.Lock()
+		if runner.recordingErr == nil {
+			runner.recordingErr = fmt.Errorf("session recording failed: %w", err)
 		}
-		if event.Err != nil {
-			record.Error = event.Err.Error()
-		}
-		if event.Telemetry == nil || event.Telemetry.Estimated || event.Telemetry.Final {
-			_ = runner.store.Append(record)
-		}
-		if emit != nil {
-			emit(event)
-		}
-	})
+		cause := runner.recordingErr
+		runner.mu.Unlock()
+		cancel(cause)
+	}
+	turnID := fmt.Sprintf("turn-%d", runner.turns.Add(1))
+	if err := runner.store.Append(Record{Kind: "turn_started", TurnID: turnID, Text: prompt}); err != nil {
+		failRecording(err)
+		return "", fmt.Errorf("record turn start: %w", err)
+	}
+	var answer string
+	var err error
+	if turnContext.Err() != nil {
+		err = turnContext.Err()
+	} else {
+		answer, err = runner.runner.Run(turnContext, prompt, func(event agent.Event) {
+			runner.mu.Lock()
+			failed := runner.recordingErr != nil
+			runner.mu.Unlock()
+			if failed {
+				return
+			}
+			record := Record{
+				Kind: string(event.Kind), TurnID: turnID, Text: event.Text,
+				ToolName: event.ToolName, CallID: event.CallID, Arguments: event.Arguments,
+				Telemetry: event.Telemetry,
+			}
+			if event.Err != nil {
+				record.Error = event.Err.Error()
+			}
+			if event.Telemetry == nil || event.Telemetry.Estimated || event.Telemetry.Final {
+				if appendErr := runner.store.Append(record); appendErr != nil {
+					failRecording(appendErr)
+					return
+				}
+			}
+			if emit != nil {
+				emit(event)
+			}
+		})
+	}
+	runner.mu.Lock()
+	recordingErr := runner.recordingErr
+	runner.mu.Unlock()
+	err = errors.Join(err, recordingErr)
+	if err == nil && turnContext.Err() != nil {
+		err = turnContext.Err()
+	}
 	completion := Record{Kind: "turn_completed", TurnID: turnID, Text: answer}
 	if err != nil {
 		completion.Kind = "turn_failed"
+		completion.Text = ""
 		completion.Error = err.Error()
 	}
-	if appendErr := runner.store.Append(completion); appendErr != nil && err == nil {
-		return answer, appendErr
+	if appendErr := runner.store.Append(completion); appendErr != nil {
+		failRecording(appendErr)
+		err = errors.Join(err, fmt.Errorf("record turn completion: %w", appendErr))
 	}
-	return answer, err
+	if err != nil {
+		return "", err
+	}
+	return answer, nil
+}
+
+// Close cancels and joins the active turn before callers close logs, tools, or
+// inference resources. No new turns may start after shutdown begins.
+func (runner *RecordingRunner) Close() {
+	runner.mu.Lock()
+	runner.closed = true
+	cancel, done := runner.activeCancel, runner.activeDone
+	runner.mu.Unlock()
+	if cancel != nil {
+		cancel(context.Canceled)
+	}
+	if done != nil {
+		<-done
+	}
 }

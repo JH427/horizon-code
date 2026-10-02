@@ -76,6 +76,8 @@ type Engine struct {
 	workspaceInstructions string
 	stateMu               sync.Mutex
 	pendingVerification   bool
+	runMu                 sync.Mutex
+	history               []model.Message
 }
 
 func NewEngine(streamer Streamer, availableTools []Tool, maxSteps int) *Engine {
@@ -147,6 +149,13 @@ func normalizeBudget(budget Budget) Budget {
 }
 
 func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) (string, error) {
+	if !engine.runMu.TryLock() {
+		return "", errors.New("agent turn already running")
+	}
+	defer engine.runMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if engine.model == nil {
 		return "", errors.New("agent model is required")
 	}
@@ -163,10 +172,14 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 	if engine.workspaceInstructions != "" {
 		systemPrompt += "\n\nFollow these hierarchical HORIZON.md workspace instructions, listed from broadest to most specific; where instructions conflict, more specific instructions take precedence:\n\n<workspace_instructions>\n" + engine.workspaceInstructions + "\n</workspace_instructions>"
 	}
-	messages := []model.Message{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: prompt},
+	messages := append([]model.Message(nil), engine.history...)
+	if len(messages) == 0 {
+		messages = append(messages, model.Message{Role: "system", Content: systemPrompt})
+	} else {
+		messages[0] = model.Message{Role: "system", Content: systemPrompt}
 	}
+	messages = append(messages, model.Message{Role: "user", Content: prompt})
+	defer func() { engine.history = closeInterruptedToolRounds(messages) }()
 	engine.stateMu.Lock()
 	dirty := engine.pendingVerification
 	engine.stateMu.Unlock()
@@ -176,6 +189,16 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 	toolResultBytes := 0
 
 	for step := 0; step < engine.budget.MaxSteps; step++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if engine.backgroundJobsRunning() {
+			dirty = true
+			verifiedAfterChange = false
+			engine.stateMu.Lock()
+			engine.pendingVerification = true
+			engine.stateMu.Unlock()
+		}
 		estimatedTokens, err := estimateRequestTokens(messages, engine.definitions)
 		if err != nil {
 			return "", err
@@ -204,6 +227,9 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 			}})
 		}
 
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		bufferAssistant := dirty && !verifiedAfterChange
 		var bufferedAssistant []string
 		flushBufferedAssistant := func() {
@@ -237,6 +263,9 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 		if err != nil {
 			return "", fmt.Errorf("model step %d: %w", step+1, err)
 		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if response.Usage.TotalTokens > engine.budget.MaxContextTokens {
 			return "", fmt.Errorf("agent reported context budget exceeded after model step %d: %d tokens > %d", step+1, response.Usage.TotalTokens, engine.budget.MaxContextTokens)
 		}
@@ -253,7 +282,7 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 				return "", errors.New("model returned neither text nor a tool call")
 			}
 			if dirty && !verifiedAfterChange {
-				reminder := "VERIFICATION_REQUIRED\nYou changed the workspace but have not successfully run a verification command afterward. Inspect the diff if needed, run an appropriate build, test, or static check with run_command, repair failures, and only then provide the final answer."
+				reminder := "VERIFICATION_REQUIRED\nYou changed the workspace but have not successfully run a verification command afterward. Wait for or stop all managed background jobs first, then inspect the diff if needed, run an appropriate build, test, or static check with run_command, repair failures, and only then provide the final answer."
 				messages = append(messages, model.Message{Role: "user", Content: reminder})
 				if emit != nil {
 					emit(Event{Kind: EventVerification, Text: reminder})
@@ -261,6 +290,9 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 				continue
 			}
 			flushBufferedAssistant()
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
 			return response.Text, nil
 		}
 
@@ -271,8 +303,15 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 		flushBufferedAssistant()
 
 		for _, call := range response.ToolCalls {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
 			if emit != nil {
 				emit(Event{Kind: EventToolStarted, ToolName: call.Name, CallID: call.ID, Arguments: call.Arguments})
+			}
+			// Recording callbacks may cancel the turn; never execute an unrecorded call.
+			if err := ctx.Err(); err != nil {
+				return "", err
 			}
 			tool, found := engine.tools[call.Name]
 			if !found {
@@ -291,6 +330,7 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 				continue
 			}
 
+			backgroundWasRunning := engine.backgroundJobsRunning()
 			result, toolErr := tool.Run(ctx, []byte(call.Arguments))
 			if result.Changed {
 				dirty = true
@@ -301,6 +341,10 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 			}
 			if toolErr != nil {
 				if errors.Is(toolErr, context.Canceled) || errors.Is(toolErr, context.DeadlineExceeded) {
+					messages = append(messages, model.Message{Role: "tool", ToolCallID: call.ID, Content: "TOOL_ERROR\n" + toolErr.Error() + "\n" + result.Content})
+					if emit != nil {
+						emit(Event{Kind: EventToolFailed, ToolName: call.Name, CallID: call.ID, Text: result.Content, Err: toolErr})
+					}
 					return "", toolErr
 				}
 				content := "TOOL_ERROR\n" + toolErr.Error()
@@ -322,22 +366,64 @@ func (engine *Engine) Run(ctx context.Context, prompt string, emit func(Event)) 
 			}
 
 			content := result.Content
+			if result.Verified && dirty {
+				if backgroundWasRunning || engine.backgroundJobsRunning() {
+					content += "\nVERIFICATION_REQUIRED\nManaged background jobs were active during verification. Wait for or stop every job, then run verification again. This command does not clear pending verification."
+				} else {
+					verifiedAfterChange = true
+					engine.stateMu.Lock()
+					engine.pendingVerification = false
+					engine.stateMu.Unlock()
+				}
+			}
+			messages = append(messages, model.Message{Role: "tool", ToolCallID: call.ID, Content: content})
 			if err := addToolResultBytes(&toolResultBytes, len(content), engine.budget.MaxToolResultBytes); err != nil {
 				return "", err
 			}
-			if result.Verified && dirty {
-				verifiedAfterChange = true
-				engine.stateMu.Lock()
-				engine.pendingVerification = false
-				engine.stateMu.Unlock()
-			}
-			messages = append(messages, model.Message{Role: "tool", ToolCallID: call.ID, Content: content})
 			if emit != nil {
 				emit(Event{Kind: EventToolCompleted, ToolName: call.Name, CallID: call.ID, Text: content})
 			}
 		}
 	}
 	return "", fmt.Errorf("agent exceeded the %d-step budget", engine.budget.MaxSteps)
+}
+
+// backgroundActivity is defined here, where completion policy consumes it.
+// Even inspect-purpose executables can mutate files and therefore block verification.
+type backgroundActivity interface {
+	HasRunningProcesses() bool
+}
+
+func (engine *Engine) backgroundJobsRunning() bool {
+	for _, tool := range engine.tools {
+		if activity, ok := tool.(backgroundActivity); ok && activity.HasRunningProcesses() {
+			return true
+		}
+	}
+	return false
+}
+
+// Persist completed evidence even on cancellation, but never send an incomplete
+// assistant/tool exchange into the next turn. Missing results convey uncertainty,
+// not a claim that a cancelled or unstarted operation succeeded.
+func closeInterruptedToolRounds(messages []model.Message) []model.Message {
+	closed := make([]model.Message, 0, len(messages))
+	for index := 0; index < len(messages); index++ {
+		message := messages[index]
+		closed = append(closed, message)
+		if message.Role != "assistant" {
+			continue
+		}
+		for _, call := range message.ToolCalls {
+			if index+1 < len(messages) && messages[index+1].Role == "tool" && messages[index+1].ToolCallID == call.ID {
+				index++
+				closed = append(closed, messages[index])
+			} else {
+				closed = append(closed, model.Message{Role: "tool", ToolCallID: call.ID, Content: "TOOL_ERROR\nThe turn stopped without a completed result for this call. Do not assume it succeeded; inspect current state before continuing."})
+			}
+		}
+	}
+	return closed
 }
 
 func translateTelemetry(source *model.Telemetry, step int, budget Budget) *Telemetry {

@@ -206,6 +206,8 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 		}
 	}()
 	recordedEngine := session.NewRecordingRunner(engine, store)
+	// Registered last: cancel and join the turn before logs/tools/server close.
+	defer recordedEngine.Close()
 
 	if config.prompt != "" {
 		_, err := recordedEngine.Run(ctx, config.prompt, func(event agent.Event) {
@@ -228,7 +230,7 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 		return err
 	}
 
-	interfaceModel := tui.NewModel(recordedEngine, config.model, config.workspace)
+	interfaceModel := tui.NewModelWithContext(ctx, recordedEngine, config.model, config.workspace)
 	interfaceModel.SetServedContext(modelClient.ContextSize())
 	interfaceModel.SetActiveContextLimit(budget.MaxContextTokens)
 	interfaceModel.SetCapability(string(config.capability))
@@ -241,6 +243,8 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 	interfaceModel.SetResourceSampler(resourceSampler)
 	program := tea.NewProgram(interfaceModel, tea.WithContext(ctx))
 	_, err = program.Run()
+	// Also cancel on renderer/input failures or ordinary UI exit, not only signals.
+	stopSignals()
 	return err
 }
 
