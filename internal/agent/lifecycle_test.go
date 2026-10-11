@@ -127,6 +127,9 @@ func TestEngineDoesNotExecuteCallCancelledByRecordingCallback(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || executed != 0 {
 		t.Fatalf("err=%v, executed=%d", err, executed)
 	}
+	if engine.lastToolName != "modify" || engine.lastToolSucceeded != nil {
+		t.Fatalf("cancelled tool outcome = name %q, succeeded %v; want unknown", engine.lastToolName, engine.lastToolSucceeded)
+	}
 	assertToolProtocol(t, engine.history)
 }
 

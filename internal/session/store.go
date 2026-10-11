@@ -24,16 +24,17 @@ type Metadata struct {
 }
 
 type Record struct {
-	Time      time.Time        `json:"time"`
-	Kind      string           `json:"kind"`
-	TurnID    string           `json:"turn_id,omitempty"`
-	Text      string           `json:"text,omitempty"`
-	ToolName  string           `json:"tool_name,omitempty"`
-	CallID    string           `json:"call_id,omitempty"`
-	Arguments string           `json:"arguments,omitempty"`
-	Error     string           `json:"error,omitempty"`
-	Metadata  *Metadata        `json:"metadata,omitempty"`
-	Telemetry *agent.Telemetry `json:"telemetry,omitempty"`
+	Time      time.Time               `json:"time"`
+	Kind      string                  `json:"kind"`
+	TurnID    string                  `json:"turn_id,omitempty"`
+	Text      string                  `json:"text,omitempty"`
+	ToolName  string                  `json:"tool_name,omitempty"`
+	CallID    string                  `json:"call_id,omitempty"`
+	Arguments string                  `json:"arguments,omitempty"`
+	Error     string                  `json:"error,omitempty"`
+	Metadata  *Metadata               `json:"metadata,omitempty"`
+	Telemetry *agent.Telemetry        `json:"telemetry,omitempty"`
+	Decision  *agent.DecisionEvidence `json:"decision,omitempty"`
 }
 
 type Store struct {
@@ -206,7 +207,7 @@ func (runner *RecordingRunner) Run(ctx context.Context, prompt string, emit func
 			record := Record{
 				Kind: string(event.Kind), TurnID: turnID, Text: event.Text,
 				ToolName: event.ToolName, CallID: event.CallID, Arguments: event.Arguments,
-				Telemetry: event.Telemetry,
+				Telemetry: event.Telemetry, Decision: event.Decision,
 			}
 			if event.Err != nil {
 				record.Error = event.Err.Error()

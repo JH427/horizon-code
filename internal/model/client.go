@@ -13,15 +13,16 @@ import (
 )
 
 type Config struct {
-	BaseURL          string
-	Model            string
-	Temperature      float64
-	TopP             float64
-	TopK             int
-	MaxTokens        int
-	ReasoningEffort  string
-	EnableThinking   bool
-	PreserveThinking bool
+	BaseURL               string
+	Model                 string
+	Temperature           float64
+	TopP                  float64
+	TopK                  int
+	MaxTokens             int
+	ReasoningEffort       string
+	ReasoningBudgetTokens int
+	EnableThinking        bool
+	PreserveThinking      bool
 }
 
 type Client struct {
@@ -62,8 +63,19 @@ type FunctionWire struct {
 }
 
 type Request struct {
-	Messages []Message
-	Tools    []Tool
+	Messages         []Message
+	Tools            []Tool
+	InferenceOptions InferenceOptions
+}
+
+// InferenceOptions contains request-scoped overrides. Pointer fields preserve
+// the distinction between no override and explicit false, empty, or zero
+// values without mutating the client's configured defaults.
+type InferenceOptions struct {
+	EnableThinking        *bool
+	ReasoningEffort       *string
+	ReasoningBudgetTokens *int
+	MaxTokens             *int
 }
 
 type Response struct {
@@ -112,18 +124,19 @@ type Event struct {
 }
 
 type chatRequest struct {
-	Model              string          `json:"model"`
-	Messages           []Message       `json:"messages"`
-	Tools              []toolWire      `json:"tools,omitempty"`
-	Stream             bool            `json:"stream"`
-	StreamOptions      streamOptions   `json:"stream_options"`
-	TimingsPerToken    bool            `json:"timings_per_token"`
-	Temperature        float64         `json:"temperature,omitempty"`
-	TopP               float64         `json:"top_p,omitempty"`
-	TopK               int             `json:"top_k,omitempty"`
-	MaxTokens          int             `json:"max_tokens,omitempty"`
-	ReasoningEffort    string          `json:"reasoning_effort,omitempty"`
-	ChatTemplateKwargs map[string]bool `json:"chat_template_kwargs,omitempty"`
+	Model                 string          `json:"model"`
+	Messages              []Message       `json:"messages"`
+	Tools                 []toolWire      `json:"tools,omitempty"`
+	Stream                bool            `json:"stream"`
+	StreamOptions         streamOptions   `json:"stream_options"`
+	TimingsPerToken       bool            `json:"timings_per_token"`
+	Temperature           float64         `json:"temperature,omitempty"`
+	TopP                  float64         `json:"top_p,omitempty"`
+	TopK                  int             `json:"top_k,omitempty"`
+	MaxTokens             *int            `json:"max_tokens,omitempty"`
+	ReasoningEffort       string          `json:"reasoning_effort,omitempty"`
+	ReasoningBudgetTokens *int            `json:"thinking_budget_tokens,omitempty"`
+	ChatTemplateKwargs    map[string]bool `json:"chat_template_kwargs,omitempty"`
 }
 
 type streamOptions struct {
@@ -229,12 +242,31 @@ func (client *Client) Stream(ctx context.Context, request Request, emit func(Eve
 		Temperature:     client.config.Temperature,
 		TopP:            client.config.TopP,
 		TopK:            client.config.TopK,
-		MaxTokens:       client.config.MaxTokens,
 		ReasoningEffort: client.config.ReasoningEffort,
 		ChatTemplateKwargs: map[string]bool{
 			"enable_thinking":   client.config.EnableThinking,
 			"preserve_thinking": client.config.PreserveThinking,
 		},
+	}
+	if client.config.MaxTokens != 0 {
+		limit := client.config.MaxTokens
+		body.MaxTokens = &limit
+	}
+	if client.config.ReasoningBudgetTokens != 0 {
+		budget := client.config.ReasoningBudgetTokens
+		body.ReasoningBudgetTokens = &budget
+	}
+	if request.InferenceOptions.EnableThinking != nil {
+		body.ChatTemplateKwargs["enable_thinking"] = *request.InferenceOptions.EnableThinking
+	}
+	if request.InferenceOptions.ReasoningEffort != nil {
+		body.ReasoningEffort = *request.InferenceOptions.ReasoningEffort
+	}
+	if request.InferenceOptions.ReasoningBudgetTokens != nil {
+		body.ReasoningBudgetTokens = request.InferenceOptions.ReasoningBudgetTokens
+	}
+	if request.InferenceOptions.MaxTokens != nil {
+		body.MaxTokens = request.InferenceOptions.MaxTokens
 	}
 	for _, tool := range request.Tools {
 		body.Tools = append(body.Tools, toolWire{

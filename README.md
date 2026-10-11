@@ -41,10 +41,26 @@ internal/session/   local event/session persistence
 - Strict single-value tool JSON, validated streamed tool metadata, usage parsing, and fail-closed handling for truncated streams.
 - Three explicit capability levels: confined `safe` mode by default, broad structured-exec `workspace` autonomy, and opt-in unrestricted `operator` shell autonomy.
 - Deterministic context compaction replaces only older complete assistant/tool rounds, preserves the original request and recent evidence, and never breaks tool-call/result pairing.
+- Task-specific `--lock-after-verification` optionally freezes the first passing workspace and permits two short finalization steps. It is disabled by default so intermediate tests do not terminate ordinary multi-stage coding.
 
 The real Qwen3.8 path is validated against the local Q4_K_M + BF16 mmproj lane: streamed reasoning/text, native tool use, edit/diff/test loops, verification gating, and cancellation passed on 2026-08-25. On 2026-08-26, the exact operator release candidate also completed a bounded create/patch/move/shell/background/delete/`run_command` acceptance loop, passed its generated Go test, returned the requested exact token, and stopped its owned inference/process resources. Real inference remains explicit: ordinary Go tests and builds never launch the model.
 
 The detailed, source-backed v0.1 contract is in [docs/v0.1-design.md](docs/v0.1-design.md).
+
+## Decision-policy pilots
+
+The decision-policy sprint tests whether a local typed model can allocate Qwen's reasoning budget. `off` remains the default; shadow mode records decisions without changing Qwen, and sidecar timeout, malformed output, or unavailability falls back to normal inference.
+
+The pinned Laya CPU/ONNX evaluation closed with **stop**: it matched 4/8 policy labels and made consequential false-fast choices. THX-01 subsequently matched 7/8 with no false-fast choices and earned further opt-in evaluation. THX-01 is now the default checkpoint whenever decision mode is enabled; routing itself remains off by default because the external sidecar is not installed or owned by Horizon Code. An initial Prime Numbers artifact snapshot favored THX-01 but used a flawed verifier. A corrected three-problem comparison did not support the current broad escalation policy: fixed Qwen completed 3/3, while THX-routed Qwen completed 2/3, took 39.5% longer, and used more tokens. Identical generic wrapper prompts also exposed that the one-shot pre-inspection router lacks enough task evidence. Active mode remains experimental and is never selected implicitly.
+
+- Sprint contract: [docs/laya-decision-policy-sprint.md](docs/laya-decision-policy-sprint.md)
+- Smoke evidence and closeout: [docs/laya-decision-policy-smoke.md](docs/laya-decision-policy-smoke.md)
+- Authorized active GolfBench comparison: [docs/laya-active-golfbench-experiment.md](docs/laya-active-golfbench-experiment.md)
+- THX-01 and bounded-Qwen experiment: [docs/thx01-routing-experiment.md](docs/thx01-routing-experiment.md)
+- Corrected three-problem comparison: [docs/thx01-three-problem-golfbench.md](docs/thx01-three-problem-golfbench.md)
+- Current hardening policy: [docs/decision-policy-hardening.md](docs/decision-policy-hardening.md)
+- Strix Halo NPU feasibility report: [docs/laya-npu-feasibility.md](docs/laya-npu-feasibility.md)
+- One-page visual explainer: [docs/laya-policy-explainer.html](docs/laya-policy-explainer.html)
 
 ## Running
 
@@ -67,7 +83,7 @@ cd /path/you/want/to/work/in
 horizon-code
 ```
 
-Launching Horizon Code starts `~/.config/horizon-llm/run-server.sh` by default, waits for `/health`, verifies that `/v1/models` contains `qwen38-27b`, and then opens the TUI. Override the launcher with `--server-command` on another setup. The inference process group is owned by that Horizon Code session and is stopped when the program exits. If the configured health endpoint already has a healthy server, Horizon Code refuses to claim or stop it.
+Launching Horizon Code starts `~/.config/horizon-llm/run-server.sh` by default, waits for `/health`, verifies that `/v1/models` contains `qwen38-27b`, and then opens the TUI. The current normal Qwen lane keeps thinking enabled with `reasoning_effort=low`, a 2,048-token hard thinking budget, and a 4,096-token total completion cap. `reasoning_effort` itself is only advisory; the hard thinking limit is sent through llama.cpp's `thinking_budget_tokens` extension. Override the launcher with `--server-command` on another setup. The inference process group is owned by that Horizon Code session and is stopped when the program exits. If the configured health endpoint already has a healthy server, Horizon Code refuses to claim or stop it.
 
 Turns, reasoning, tool arguments, and tool results are written as replayable private JSONL files under `~/.local/state/horizon-code/sessions/` (or `$XDG_STATE_HOME/horizon-code/sessions/`). This keeps arbitrary working directories clean.
 
@@ -117,6 +133,30 @@ bin/horizon-code --workspace /path/to/repo --prompt 'Read README.md and summariz
 
 Both interactive and headless modes start real inference. Do not run either as part of ordinary Go tests or builds.
 
+### Decision-policy shadow mode
+
+Decision routing is disabled by default. Shadow mode records a turn-start decision and at most one post-inspection decision without applying either:
+
+```bash
+horizon-code --decision-mode shadow \
+  --decision-url http://127.0.0.1:8001 \
+  --decision-timeout 2s
+```
+
+The sidecar must already be running on a loopback HTTP address; Horizon Code never installs, starts, or owns it. Shadow results are written to the private session journal but cannot alter Qwen inference options, tools, capabilities, verification, or completion. An unavailable, slow, or malformed sidecar records an error and falls back to the existing Qwen path.
+
+THX-01 answers three typed questions: inference lane, task complexity, and mutation likelihood. The router gathers file evidence during up to two initial inspection steps, then makes at most one additional decision before step three, provided no mutation occurred. Task/specification excerpts are prioritized over code/test excerpts. Evidence is capped at 1,200 bytes per task excerpt, 256 bytes per other excerpt, and 1,800 bytes total. Read-file formatting is stripped and oversized code/data lines are omitted with explicit incomplete-evidence marking. The default CPU sidecar deadline is 2 seconds; `--decision-timeout` remains configurable. The post-inspection route replaces the initial route.
+
+Active routing requires `P(A)>=0.75` to extend reasoning. Uncertain `C` can escalate at complexity >=2.5 or mutation likelihood >=0.9; explicit endpoint abstention remains distinct and preserves defaults. Fast `B` requires both auxiliary outputs, complexity <=1.5, mutation likelihood <=0.4, sufficient B probability, and untruncated evidence. Tool failures and pending-verification recovery select deliberate reasoning independently of classifier availability. These thresholds are conservative experimental settings, not validated calibration. Shadow mode never changes reasoning; routing remains opt-in.
+
+```bash
+horizon-code --decision-mode active \
+  --decision-url http://127.0.0.1:8001 \
+  --decision-checkpoint doofz/THX-01 \
+  --decision-timeout 2s \
+  --decision-min-confidence 0.55
+```
+
 The validated marker smoke is:
 
 ```bash
@@ -136,6 +176,13 @@ Useful overrides:
 --startup-timeout DURATION
 --shutdown-timeout DURATION
 --capability safe|workspace|operator
+--decision-mode off|shadow|active
+--decision-url http://127.0.0.1:8001
+--decision-checkpoint ID
+--decision-timeout DURATION
+--decision-min-confidence (0.0,1.0]
+--max-steps COUNT  # 1-256; omit or use 0 for the capability default
+--lock-after-verification  # optional task-specific first-passing-artifact finalization
 ```
 
 ## Toolchain

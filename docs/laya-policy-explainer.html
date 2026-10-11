@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Laya × Horizon Code — Integration Explainer</title>
+  <style>
+    :root {
+      --bg: #08090a;
+      --panel: #0f1012;
+      --panel-2: #15161a;
+      --text: #f7f8f8;
+      --body: #c6cad2;
+      --muted: #858b96;
+      --faint: #62666d;
+      --line: rgba(255,255,255,.085);
+      --line-soft: rgba(255,255,255,.05);
+      --violet: #7170ff;
+      --violet-soft: rgba(113,112,255,.14);
+      --green: #59d499;
+      --green-soft: rgba(89,212,153,.12);
+      --amber: #f6c177;
+      --amber-soft: rgba(246,193,119,.12);
+      --red: #ff7b86;
+      --red-soft: rgba(255,123,134,.12);
+      --mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(850px 440px at 18% -8%, rgba(113,112,255,.18), transparent 66%),
+        radial-gradient(700px 400px at 92% 2%, rgba(74,127,255,.08), transparent 65%),
+        var(--bg);
+      font-family: var(--sans);
+      font-feature-settings: "cv01", "ss03";
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .shell { width: min(1180px, calc(100% - 40px)); margin: 0 auto; }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      backdrop-filter: blur(18px);
+      background: rgba(8,9,10,.78);
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .topbar {
+      min-height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .brand { display: flex; align-items: center; gap: 11px; font-size: 14px; font-weight: 560; }
+    .mark {
+      width: 25px; height: 25px; border-radius: 7px;
+      display: grid; place-items: center;
+      background: linear-gradient(145deg, #8584ff, #5554cb);
+      box-shadow: 0 0 28px rgba(113,112,255,.26), inset 0 0 0 1px rgba(255,255,255,.18);
+    }
+    .mark svg { width: 15px; height: 15px; }
+    .meta { color: var(--muted); font: 11px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
+
+    main { padding: 74px 0 80px; }
+    .hero { display: grid; grid-template-columns: 1.2fr .8fr; gap: 58px; align-items: center; padding-bottom: 66px; }
+    .eyebrow { display: flex; align-items: center; gap: 9px; margin-bottom: 18px; color: #aaa9ff; font: 12px var(--mono); text-transform: uppercase; letter-spacing: .09em; }
+    .eyebrow::before { content: ""; width: 22px; height: 1px; background: var(--violet); box-shadow: 0 0 12px var(--violet); }
+    h1 { margin: 0; max-width: 760px; font-size: clamp(44px, 6.2vw, 76px); line-height: .98; letter-spacing: -.055em; font-weight: 520; }
+    .gradient { color: transparent; background: linear-gradient(100deg, #fff 8%, #aeadff 62%, #7170ff); background-clip: text; -webkit-background-clip: text; }
+    .lede { max-width: 720px; margin: 25px 0 0; color: var(--body); font-size: 18px; line-height: 1.65; letter-spacing: -.012em; }
+    .lede strong { color: var(--text); font-weight: 560; }
+
+    .verdict {
+      position: relative;
+      padding: 24px;
+      border: 1px solid rgba(113,112,255,.27);
+      border-radius: 16px;
+      background: linear-gradient(145deg, rgba(113,112,255,.105), rgba(255,255,255,.018));
+      box-shadow: 0 22px 70px rgba(0,0,0,.34), inset 0 1px rgba(255,255,255,.05);
+      overflow: hidden;
+    }
+    .verdict::after { content: ""; position: absolute; width: 180px; height: 180px; right: -75px; top: -90px; border-radius: 50%; background: rgba(113,112,255,.2); filter: blur(48px); }
+    .label { position: relative; z-index: 1; color: #aaa9ff; font: 11px var(--mono); text-transform: uppercase; letter-spacing: .1em; }
+    .verdict h2 { position: relative; z-index: 1; margin: 13px 0 10px; font-size: 25px; line-height: 1.18; letter-spacing: -.032em; font-weight: 540; }
+    .verdict p { position: relative; z-index: 1; margin: 0; color: var(--body); line-height: 1.58; font-size: 14px; }
+    .signal { display: flex; align-items: center; gap: 8px; margin-top: 20px; color: var(--green); font: 12px var(--mono); }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 12px currentColor; }
+
+    .section { margin-top: 22px; }
+    .section-head { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
+    .section h2 { margin: 0; font-size: 28px; letter-spacing: -.038em; font-weight: 520; }
+    .section-note { max-width: 560px; color: var(--muted); font-size: 13px; line-height: 1.5; text-align: right; }
+
+    .architecture {
+      display: grid;
+      grid-template-columns: 1fr 56px 1.1fr 56px 1fr;
+      gap: 12px;
+      align-items: stretch;
+    }
+    .node {
+      min-height: 168px;
+      padding: 21px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: linear-gradient(145deg, rgba(255,255,255,.035), rgba(255,255,255,.012));
+      box-shadow: inset 0 1px rgba(255,255,255,.025);
+    }
+    .node.primary { border-color: rgba(113,112,255,.3); background: linear-gradient(145deg, rgba(113,112,255,.10), rgba(255,255,255,.014)); }
+    .node-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .node h3 { margin: 0; font-size: 17px; letter-spacing: -.025em; font-weight: 560; }
+    .chip { padding: 5px 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font: 10px var(--mono); text-transform: uppercase; letter-spacing: .05em; }
+    .node p { margin: 16px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .node ul { list-style: none; padding: 0; margin: 15px 0 0; display: grid; gap: 8px; }
+    .node li { color: var(--body); font-size: 12px; line-height: 1.35; display: flex; gap: 8px; }
+    .node li::before { content: "↳"; color: var(--faint); font-family: var(--mono); }
+    .arrow { display: grid; place-items: center; color: var(--faint); font: 20px var(--mono); }
+    .arrow small { display: block; margin-top: 6px; color: var(--faint); font-size: 8px; text-transform: uppercase; writing-mode: vertical-rl; letter-spacing: .08em; }
+
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .card { padding: 21px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.019); }
+    .number { color: var(--faint); font: 11px var(--mono); }
+    .card h3 { margin: 18px 0 8px; font-size: 17px; letter-spacing: -.02em; font-weight: 560; }
+    .card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.58; }
+    .card.best { border-color: rgba(89,212,153,.25); background: linear-gradient(145deg, var(--green-soft), rgba(255,255,255,.012)); }
+    .best .number { color: var(--green); }
+    .tag { display: inline-flex; margin-top: 15px; padding: 5px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--body); font: 10px var(--mono); }
+
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .do, .dont { padding: 22px; border-radius: 12px; border: 1px solid var(--line); }
+    .do { background: var(--green-soft); border-color: rgba(89,212,153,.2); }
+    .dont { background: var(--red-soft); border-color: rgba(255,123,134,.18); }
+    .split h3 { margin: 0 0 14px; font-size: 15px; font-weight: 560; }
+    .do h3 { color: var(--green); } .dont h3 { color: var(--red); }
+    .checklist { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+    .checklist li { color: var(--body); font-size: 13px; line-height: 1.45; display: grid; grid-template-columns: 18px 1fr; gap: 8px; }
+    .checklist b { font-family: var(--mono); font-weight: 400; }
+    .do .checklist b { color: var(--green); } .dont .checklist b { color: var(--red); }
+
+    .pilot {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 12px;
+      padding: 1px;
+      border-radius: 14px;
+      background: linear-gradient(120deg, rgba(113,112,255,.48), rgba(255,255,255,.08), rgba(89,212,153,.3));
+      overflow: hidden;
+    }
+    .pilot > div { background: #0d0e10; padding: 25px; }
+    .pilot > div:first-child { border-radius: 13px 0 0 13px; }
+    .pilot > div:last-child { border-radius: 0 13px 13px 0; }
+    .steps { counter-reset: step; display: grid; gap: 14px; margin-top: 18px; }
+    .step { counter-increment: step; display: grid; grid-template-columns: 27px 1fr; gap: 11px; align-items: start; }
+    .step::before { content: counter(step); width: 25px; height: 25px; display: grid; place-items: center; border-radius: 7px; background: var(--violet-soft); border: 1px solid rgba(113,112,255,.25); color: #afaeff; font: 11px var(--mono); }
+    .step strong { display: block; font-size: 13px; font-weight: 560; margin-bottom: 3px; }
+    .step span { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .scorecard { display: grid; gap: 10px; margin-top: 18px; }
+    .metric { display: flex; justify-content: space-between; gap: 15px; padding: 11px 0; border-bottom: 1px solid var(--line-soft); font-size: 12px; }
+    .metric span:first-child { color: var(--muted); }
+    .metric span:last-child { color: var(--text); font-family: var(--mono); text-align: right; }
+
+    footer { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line-soft); display: flex; justify-content: space-between; gap: 20px; color: var(--faint); font-size: 11px; line-height: 1.5; }
+    footer code { font-family: var(--mono); color: var(--muted); }
+
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; gap: 30px; }
+      .architecture { grid-template-columns: 1fr; }
+      .arrow { min-height: 34px; transform: rotate(90deg); }
+      .arrow small { display: none; }
+      .grid-3 { grid-template-columns: 1fr; }
+      .split, .pilot { grid-template-columns: 1fr; }
+      .pilot > div:first-child, .pilot > div:last-child { border-radius: 13px; }
+      .section-head { align-items: start; flex-direction: column; }
+      .section-note { text-align: left; }
+    }
+
+    @media (max-width: 560px) {
+      .shell { width: min(100% - 24px, 1180px); }
+      main { padding-top: 48px; }
+      .meta { display: none; }
+      h1 { font-size: 43px; }
+      .lede { font-size: 16px; }
+      .split { grid-template-columns: 1fr; }
+      footer { flex-direction: column; }
+    }
+
+    @media print {
+      :root { color-scheme: light; }
+      body { background: #fff; color: #111; }
+      header { position: static; background: #fff; }
+      .shell { width: 100%; max-width: none; padding: 0 18px; }
+      main { padding: 30px 0; }
+      .hero { padding-bottom: 30px; }
+      .node, .card, .verdict, .pilot > div { background: #fafafa; color: #111; box-shadow: none; }
+      .lede, .node p, .node li, .card p, .checklist li, .step span, .section-note { color: #444; }
+      .section { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="shell topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M5 18V6m0 6h14M19 6v12" stroke="white" stroke-width="2.2" stroke-linecap="round"/><circle cx="12" cy="12" r="2.3" fill="white"/></svg>
+        </span>
+        Horizon Code <span style="color:var(--faint)">×</span> Laya
+      </div>
+      <div class="meta">Integration explainer · October 2026</div>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">A local policy layer, not another agent</div>
+        <h1>Give Qwen a <span class="gradient">gearbox.</span></h1>
+        <p class="lede">Laya can make fast, typed decisions before Qwen runs. The useful job is not writing code—it is deciding <strong>when full deliberation is worth paying for</strong>. Qwen remains the coding engine; deterministic code remains the safety system.</p>
+      </div>
+      <aside class="verdict">
+        <div class="label">Recommended first move</div>
+        <h2>Shadow a thinking-budget router.</h2>
+        <p>Ask Laya once per turn: fast path, deliberate path, or uncertain. Record the answer without changing behavior, then prove it beats both the current baseline and a simple rule.</p>
+        <div class="signal"><span class="dot"></span> Small, reversible, measurable</div>
+      </aside>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>The shape</h2>
+        <div class="section-note">Keep Laya in a local sidecar. It supplies a probabilistic hint; Horizon Code decides whether that hint is safe to apply.</div>
+      </div>
+      <div class="architecture">
+        <article class="node">
+          <div class="node-top"><h3>Laya sidecar</h3><span class="chip">~421M</span></div>
+          <p>Receives a compact state and returns one closed choice with probabilities.</p>
+          <ul><li>Loopback-only HTTP</li><li>CPU or ONNX first</li><li>Timeout means “use baseline”</li></ul>
+        </article>
+        <div class="arrow" aria-hidden="true">→<small>policy hint</small></div>
+        <article class="node primary">
+          <div class="node-top"><h3>Horizon Code policy</h3><span class="chip">authority</span></div>
+          <p>Applies only approved, confidence-gated reductions in compute. It never expands permissions.</p>
+          <ul><li>Off / shadow / active modes</li><li>Fail open to current behavior</li><li>Record every decision</li></ul>
+        </article>
+        <div class="arrow" aria-hidden="true">→<small>request options</small></div>
+        <article class="node">
+          <div class="node-top"><h3>Qwen3.8-27B</h3><span class="chip">coder</span></div>
+          <p>Still reasons, calls tools, edits files, repairs failures, and reports the result.</p>
+          <ul><li>Thinking on or off per request</li><li>Existing verification gates</li><li>Existing capability boundary</li></ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" style="margin-top:52px">
+      <div class="section-head">
+        <h2>Where performance can come from</h2>
+        <div class="section-note">Laya adds latency. It only wins if its choice avoids more Qwen work than the decision itself costs.</div>
+      </div>
+      <div class="grid-3">
+        <article class="card best">
+          <div class="number">01 · START HERE</div>
+          <h3>Thinking-mode routing</h3>
+          <p>Use no-thinking or lower effort for obvious inspection, status, summary, and exact mechanical work. Revert to normal after failure, mutation, or ambiguity.</p>
+          <span class="tag">Best prize / cleanest A-B</span>
+        </article>
+        <article class="card">
+          <div class="number">02 · LATER</div>
+          <h3>Tool-profile routing</h3>
+          <p>Send a smaller schema bundle—inspect, edit, execute, or full—to reduce prompt processing and possible tool confusion. Always retry with the full allowed set.</p>
+          <span class="tag">Useful, but easier to get wrong</span>
+        </article>
+        <article class="card">
+          <div class="number">03 · FUTURE</div>
+          <h3>Model routing</h3>
+          <p>If Horizon later serves a fast small coder beside Qwen3.8, Laya can choose which model gets the turn. That is a larger potential win, but there is no second lane today.</p>
+          <span class="tag">Wait for a real second model</span>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" style="margin-top:52px">
+      <div class="section-head">
+        <h2>The authority line</h2>
+        <div class="section-note">Decision models are schema-safe, not truth-safe. Confidence is evidence to measure—not permission to trust.</div>
+      </div>
+      <div class="split">
+        <div class="do">
+          <h3>Laya may recommend</h3>
+          <ul class="checklist">
+            <li><b>✓</b><span>Fast, deliberate, or uncertain inference mode</span></li>
+            <li><b>✓</b><span>A bounded tool-profile candidate</span></li>
+            <li><b>✓</b><span>Inspect, implement, verify, or recovery phase</span></li>
+            <li><b>✓</b><span>Escalation back to the full baseline</span></li>
+          </ul>
+        </div>
+        <div class="dont">
+          <h3>Laya must never control</h3>
+          <ul class="checklist">
+            <li><b>×</b><span>Capability, shell, network, or destructive authority</span></li>
+            <li><b>×</b><span>Verification requirements or “task complete” gates</span></li>
+            <li><b>×</b><span>Tool arguments, paths, or command safety</span></li>
+            <li><b>×</b><span>Context protocol integrity or process cleanup</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" style="margin-top:52px">
+      <div class="section-head">
+        <h2>A bounded pilot</h2>
+        <div class="section-note">Zero-shot Laya is not the product. The product would be a Horizon Code-specific, calibrated policy head—if the evidence justifies one.</div>
+      </div>
+      <div class="pilot">
+        <div>
+          <div class="label">Build order</div>
+          <div class="steps">
+            <div class="step"><div><strong>Add plumbing, default off</strong><span>A small Go client, per-request Qwen options, typed journal events, and no Python inside the binary.</span></div></div>
+            <div class="step"><div><strong>Run shadow mode</strong><span>Ask once per turn; log choice, probabilities, truncation, checkpoint, and cold/warm latency. Change nothing.</span></div></div>
+            <div class="step"><div><strong>Challenge it with a dumb rule</strong><span>If Laya cannot beat a transparent read-only/otherwise-normal heuristic, stop. Neural bureaucracy is still bureaucracy.</span></div></div>
+            <div class="step"><div><strong>Activate only selective wins</strong><span>High-confidence fast-path decisions only. Timeout, error, low confidence, mutation, or repair restores today’s Qwen settings.</span></div></div>
+            <div class="step"><div><strong>Specialize only after evidence</strong><span>Train and recalibrate on compact Horizon Code decisions, with genuinely held-out evaluation data.</span></div></div>
+          </div>
+        </div>
+        <div>
+          <div class="label">Promotion scorecard</div>
+          <div class="scorecard">
+            <div class="metric"><span>Task success</span><span>No regression</span></div>
+            <div class="metric"><span>Verification behavior</span><span>Identical</span></div>
+            <div class="metric"><span>TTFT + wall time</span><span>Measured win</span></div>
+            <div class="metric"><span>Generated reasoning</span><span>Reduced</span></div>
+            <div class="metric"><span>Laya latency</span><span>Smaller than savings</span></div>
+            <div class="metric"><span>False fast routes</span><span>Rare + recoverable</span></div>
+            <div class="metric"><span>Failure behavior</span><span>Baseline restored</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <div><strong style="color:var(--body);font-weight:560">Bottom line:</strong> Laya should be a local performance hint, never a control authority.</div>
+      <div>Suggested flags: <code>--decision-mode off|shadow|active</code></div>
+    </footer>
+  </main>
+</body>
+</html>

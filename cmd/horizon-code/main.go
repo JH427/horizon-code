@@ -6,7 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,6 +21,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/JH427/horizon-code/internal/agent"
+	"github.com/JH427/horizon-code/internal/decision"
 	"github.com/JH427/horizon-code/internal/instructions"
 	"github.com/JH427/horizon-code/internal/model"
 	"github.com/JH427/horizon-code/internal/resources"
@@ -28,16 +32,23 @@ import (
 )
 
 type appConfig struct {
-	serverCommand string
-	baseURL       string
-	healthURL     string
-	model         string
-	workspace     string
-	sessionRoot   string
-	prompt        string
-	startup       time.Duration
-	shutdown      time.Duration
-	capability    capabilityMode
+	serverCommand         string
+	baseURL               string
+	healthURL             string
+	model                 string
+	workspace             string
+	sessionRoot           string
+	prompt                string
+	startup               time.Duration
+	shutdown              time.Duration
+	capability            capabilityMode
+	decisionMode          agent.DecisionMode
+	decisionURL           string
+	decisionCheckpoint    string
+	decisionTimeout       time.Duration
+	decisionMinConfidence float64
+	maxSteps              int
+	lockAfterVerification bool
 }
 
 type capabilityMode string
@@ -77,6 +88,7 @@ func parseConfig(arguments []string) (appConfig, error) {
 	flags := flag.NewFlagSet("horizon-code", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	capability := string(capabilitySafe)
+	decisionMode := string(agent.DecisionOff)
 	flags.StringVar(&config.serverCommand, "server-command", serverCommand, "owned inference server launcher")
 	flags.StringVar(&config.baseURL, "base-url", "http://127.0.0.1:8080/v1", "OpenAI-compatible API base URL")
 	flags.StringVar(&config.healthURL, "health-url", "http://127.0.0.1:8080/health", "inference readiness URL")
@@ -87,6 +99,13 @@ func parseConfig(arguments []string) (appConfig, error) {
 	flags.DurationVar(&config.startup, "startup-timeout", 10*time.Minute, "inference readiness timeout")
 	flags.DurationVar(&config.shutdown, "shutdown-timeout", 30*time.Second, "inference shutdown timeout")
 	flags.StringVar(&capability, "capability", capability, "tool capability: safe, workspace, or operator")
+	flags.StringVar(&decisionMode, "decision-mode", decisionMode, "decision policy: off, shadow, or active")
+	flags.StringVar(&config.decisionURL, "decision-url", "http://127.0.0.1:8001", "local decision sidecar base URL")
+	flags.StringVar(&config.decisionCheckpoint, "decision-checkpoint", "doofz/THX-01", "decision model/checkpoint identifier")
+	flags.DurationVar(&config.decisionTimeout, "decision-timeout", 2*time.Second, "decision sidecar timeout (bounded CPU inference allowance)")
+	flags.Float64Var(&config.decisionMinConfidence, "decision-min-confidence", 0.55, "minimum B probability required to use fast inspection until mutation or failure in active mode")
+	flags.IntVar(&config.maxSteps, "max-steps", 0, "override the capability's per-turn model-step limit (1-256)")
+	flags.BoolVar(&config.lockAfterVerification, "lock-after-verification", false, "finalize after the first successful post-mutation verification (task-specific opt-in)")
 	if err := flags.Parse(arguments); err != nil {
 		return appConfig{}, err
 	}
@@ -95,6 +114,24 @@ func parseConfig(arguments []string) (appConfig, error) {
 	case capabilitySafe, capabilityWorkspace, capabilityOperator:
 	default:
 		return appConfig{}, fmt.Errorf("unknown capability %q; expected safe, workspace, or operator", capability)
+	}
+	config.decisionMode = agent.DecisionMode(decisionMode)
+	switch config.decisionMode {
+	case agent.DecisionOff, agent.DecisionShadow, agent.DecisionActive:
+	default:
+		return appConfig{}, fmt.Errorf("unknown decision mode %q; expected off, shadow, or active", decisionMode)
+	}
+	if config.decisionTimeout <= 0 {
+		return appConfig{}, errors.New("decision timeout must be positive")
+	}
+	if math.IsNaN(config.decisionMinConfidence) || config.decisionMinConfidence <= 0 || config.decisionMinConfidence > 1 {
+		return appConfig{}, errors.New("decision minimum confidence must be greater than 0 and at most 1")
+	}
+	if config.maxSteps < 0 || config.maxSteps > 256 {
+		return appConfig{}, errors.New("max steps must be between 0 and 256")
+	}
+	if err := validateDecisionURL(config.decisionURL); err != nil {
+		return appConfig{}, err
 	}
 	workspace, err := filepath.Abs(config.workspace)
 	if err != nil {
@@ -113,6 +150,25 @@ func parseConfig(arguments []string) (appConfig, error) {
 		return appConfig{}, fmt.Errorf("resolve session directory: %w", err)
 	}
 	return config, nil
+}
+
+func validateDecisionURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("parse decision URL: %w", err)
+	}
+	if parsed.Scheme != "http" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("decision URL must be an unauthenticated loopback HTTP URL without query or fragment")
+	}
+	host := parsed.Hostname()
+	if host == "localhost" {
+		return nil
+	}
+	address := net.ParseIP(host)
+	if address == nil || !address.IsLoopback() {
+		return fmt.Errorf("decision URL host %q is not loopback", host)
+	}
+	return nil
 }
 
 func defaultServerCommand() (string, error) {
@@ -138,6 +194,17 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 
+	var decider agent.Decider
+	if config.decisionMode == agent.DecisionShadow || config.decisionMode == agent.DecisionActive {
+		decisionClient, err := decision.NewClient(decision.Config{
+			BaseURL: config.decisionURL, Checkpoint: config.decisionCheckpoint, Timeout: config.decisionTimeout,
+		}, &http.Client{Transport: &http.Transport{}})
+		if err != nil {
+			return fmt.Errorf("configure decision client: %w", err)
+		}
+		decider = decisionClient
+	}
+
 	healthClient := &http.Client{Timeout: 2 * time.Second}
 	manager := server.NewManager(server.Config{
 		Command:         config.serverCommand,
@@ -146,6 +213,7 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 		ShutdownTimeout: config.shutdown,
 	}, healthClient)
 	fmt.Fprintf(errorOutput, "Capability: %s\n", config.capability)
+	fmt.Fprintf(errorOutput, "Decision policy: %s\n", config.decisionMode)
 	fmt.Fprintf(errorOutput, "Starting %s…\n", config.model)
 	if err := manager.Start(ctx); err != nil {
 		return err
@@ -163,15 +231,16 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 		IdleConnTimeout:       90 * time.Second,
 	}
 	modelClient := model.NewClient(model.Config{
-		BaseURL:          config.baseURL,
-		Model:            config.model,
-		Temperature:      1.0,
-		TopP:             0.95,
-		TopK:             20,
-		MaxTokens:        16384,
-		ReasoningEffort:  "medium",
-		EnableThinking:   true,
-		PreserveThinking: true,
+		BaseURL:               config.baseURL,
+		Model:                 config.model,
+		Temperature:           1.0,
+		TopP:                  0.95,
+		TopK:                  20,
+		MaxTokens:             4096,
+		ReasoningEffort:       "low",
+		ReasoningBudgetTokens: 2048,
+		EnableThinking:        true,
+		PreserveThinking:      true,
 	}, &http.Client{Transport: transport})
 	verifyContext, cancelVerify := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelVerify()
@@ -185,8 +254,19 @@ func run(config appConfig, output, errorOutput io.Writer) error {
 		}
 	}()
 	budget := agentBudget(config.capability)
+	if config.maxSteps > 0 {
+		budget.MaxSteps = config.maxSteps
+	}
 	engine := agent.NewEngineWithBudget(modelClient, availableTools, budget)
 	engine.SetCapabilityPolicy(capabilityInstructions(config.capability))
+	engine.SetLockAfterVerification(config.lockAfterVerification)
+	if err := engine.ConfigureDecisionPolicy(agent.DecisionPolicyConfig{
+		Mode: config.decisionMode, Decider: decider, CapabilityMode: string(config.capability),
+		MinConfidence: config.decisionMinConfidence, DeliberateReasoningEffort: "medium",
+		DeliberateReasoningBudgetTokens: 4096, DeliberateMaxTokens: 8192,
+	}); err != nil {
+		return fmt.Errorf("configure decision policy: %w", err)
+	}
 	instructionsFound, err := configureWorkspaceInstructions(engine, config.workspace)
 	if err != nil {
 		return err

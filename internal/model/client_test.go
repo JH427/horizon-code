@@ -33,6 +33,63 @@ func TestClientRequestsPerTokenServerTimings(t *testing.T) {
 	}
 }
 
+func TestClientAppliesRequestScopedInferenceOptions(t *testing.T) {
+	var requests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, body)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintln(writer, `data: {"choices":[{"finish_reason":"stop","delta":{"content":"ok"}}]}`)
+		_, _ = fmt.Fprintln(writer, `data: [DONE]`)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		BaseURL: server.URL, Model: "qwen38-27b", MaxTokens: 16384,
+		ReasoningEffort: "medium", ReasoningBudgetTokens: 4096, EnableThinking: true, PreserveThinking: true,
+	}, server.Client())
+	stream := func(options InferenceOptions) {
+		t.Helper()
+		_, err := client.Stream(context.Background(), Request{
+			Messages: []Message{{Role: "user", Content: "hi"}}, InferenceOptions: options,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stream(InferenceOptions{})
+	disabled := false
+	low := "low"
+	reasoningLimit := 128
+	limit := 512
+	stream(InferenceOptions{EnableThinking: &disabled, ReasoningEffort: &low, ReasoningBudgetTokens: &reasoningLimit, MaxTokens: &limit})
+	stream(InferenceOptions{})
+
+	if len(requests) != 3 {
+		t.Fatalf("request count = %d, want 3", len(requests))
+	}
+	for _, index := range []int{0, 2} {
+		kwargs, ok := requests[index]["chat_template_kwargs"].(map[string]any)
+		if !ok {
+			t.Fatalf("request %d kwargs = %#v", index, requests[index]["chat_template_kwargs"])
+		}
+		if kwargs["enable_thinking"] != true || kwargs["preserve_thinking"] != true || requests[index]["reasoning_effort"] != "medium" || requests[index]["thinking_budget_tokens"] != float64(4096) || requests[index]["max_tokens"] != float64(16384) {
+			t.Fatalf("request %d did not use configured defaults: %#v", index, requests[index])
+		}
+	}
+	kwargs := requests[1]["chat_template_kwargs"].(map[string]any)
+	if kwargs["enable_thinking"] != false || kwargs["preserve_thinking"] != true {
+		t.Fatalf("override kwargs = %#v", kwargs)
+	}
+	if requests[1]["reasoning_effort"] != "low" || requests[1]["thinking_budget_tokens"] != float64(128) || requests[1]["max_tokens"] != float64(512) {
+		t.Fatalf("override request = %#v", requests[1])
+	}
+}
+
 func TestClientStreamsReasoningTextAndToolCall(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/chat/completions" {

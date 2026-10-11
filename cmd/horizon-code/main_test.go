@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JH427/horizon-code/internal/agent"
 	"github.com/JH427/horizon-code/internal/model"
@@ -30,8 +31,62 @@ func TestParseConfigUsesHorizonDefaultsAndAllowsWorkspace(t *testing.T) {
 	if config.workspace != workspace || config.prompt != "hello" {
 		t.Fatalf("workspace/prompt = %q %q", config.workspace, config.prompt)
 	}
+	if config.lockAfterVerification {
+		t.Fatal("artifact locking must be opt-in")
+	}
 	if config.capability != capabilitySafe {
 		t.Fatalf("capability = %q, want %q", config.capability, capabilitySafe)
+	}
+	if config.decisionMode != agent.DecisionOff || config.decisionURL != "http://127.0.0.1:8001" || config.decisionCheckpoint != "doofz/THX-01" || config.decisionTimeout != 2*time.Second || config.decisionMinConfidence != 0.55 || config.maxSteps != 0 {
+		t.Fatalf("decision/budget defaults = mode %q url %q timeout %s confidence %g max_steps %d", config.decisionMode, config.decisionURL, config.decisionTimeout, config.decisionMinConfidence, config.maxSteps)
+	}
+}
+
+func TestParseConfigAcceptsTaskSpecificArtifactLock(t *testing.T) {
+	config, err := parseConfig([]string{"--workspace", t.TempDir(), "--lock-after-verification"})
+	if err != nil || !config.lockAfterVerification {
+		t.Fatalf("lock=%t err=%v", config.lockAfterVerification, err)
+	}
+}
+
+func TestParseConfigAcceptsEnabledDecisionConfigurations(t *testing.T) {
+	for _, mode := range []agent.DecisionMode{agent.DecisionShadow, agent.DecisionActive} {
+		config, err := parseConfig([]string{
+			"--workspace", t.TempDir(), "--decision-mode", string(mode),
+			"--decision-url", "http://localhost:9001/laya", "--decision-checkpoint", "doofz/THX-01", "--decision-timeout", "125ms",
+			"--decision-min-confidence", "0.8", "--max-steps", "48",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.decisionMode != mode || config.decisionURL != "http://localhost:9001/laya" || config.decisionCheckpoint != "doofz/THX-01" || config.decisionTimeout != 125*time.Millisecond || config.decisionMinConfidence != 0.8 || config.maxSteps != 48 {
+			t.Fatalf("decision config = %#v", config)
+		}
+	}
+}
+
+func TestParseConfigRejectsInvalidDecisionConfiguration(t *testing.T) {
+	tests := [][]string{
+		{"--decision-mode", "automatic"},
+		{"--decision-timeout", "0s"},
+		{"--decision-min-confidence", "0"},
+		{"--decision-min-confidence", "1.1"},
+		{"--decision-min-confidence", "NaN"},
+		{"--max-steps", "-1"},
+		{"--max-steps", "257"},
+		{"--decision-url", "https://127.0.0.1:8001"},
+		{"--decision-url", "http://192.0.2.1:8001"},
+		{"--decision-url", "http://user@127.0.0.1:8001"},
+		{"--decision-url", "http://127.0.0.1:8001?token=x"},
+		{"--decision-url", "not-a-url"},
+	}
+	for _, arguments := range tests {
+		t.Run(strings.Join(arguments, "_"), func(t *testing.T) {
+			arguments = append([]string{"--workspace", t.TempDir()}, arguments...)
+			if _, err := parseConfig(arguments); err == nil {
+				t.Fatalf("parseConfig(%v) succeeded", arguments)
+			}
+		})
 	}
 }
 
