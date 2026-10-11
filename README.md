@@ -2,6 +2,8 @@
 
 A local-first coding harness written in Go and tuned for Qwen3.8-27B on Horizon.
 
+[One-page technical explainer](docs/horizon-code-technical-explainer.html) — architecture, coding loop, THX-01 routing, safety boundaries, and benchmark evidence.
+
 ## Direction
 
 - Purpose-built for llama.cpp's OpenAI-compatible API.

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Horizon Code — Technical Explainer</title>
+<style>
+:root{--bg:#0a1019;--panel:#111b29;--text:#edf3fa;--muted:#acbdd0;--line:#29394d;--blue:#80b9ff;--green:#80dfbe;--amber:#ffd28b;--mono:ui-monospace,SFMono-Regular,Consolas,monospace}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1260px;margin:auto;padding:36px 28px 22px}a{color:var(--blue);text-underline-offset:3px}h1,h2,h3,p{margin:0}h1{font-size:clamp(30px,4vw,48px);letter-spacing:-1.8px;line-height:1.1}h2{font-size:18px;letter-spacing:-.3px}h3{font-size:14px;margin-bottom:5px}p+p{margin-top:8px}code,pre,.mono{font-family:var(--mono)}code{font-size:.9em;color:var(--green);overflow-wrap:anywhere}pre{margin:8px 0 0;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font-size:11px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}.eyebrow{color:var(--blue);font:11px var(--mono);text-transform:uppercase;letter-spacing:2px;margin-bottom:10px}.hero{display:flex;justify-content:space-between;align-items:flex-start;gap:24px}.intro{max-width:800px;color:var(--muted);font-size:16px;margin-top:12px}.status{flex-shrink:0;border:1px solid var(--line);padding:12px 16px;border-radius:10px;color:var(--muted);font-size:12px}.status strong{display:block;color:var(--green);margin-bottom:3px}.tags{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 24px}.tag{border:1px solid var(--line);border-radius:5px;padding:4px 9px;color:var(--muted);font:11px var(--mono)}section{margin-top:20px}.section-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:12px}.section-head small{color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:17px}.label{display:block;font:10px var(--mono);letter-spacing:1.2px;text-transform:uppercase;color:var(--blue);margin-bottom:7px}.muted{color:var(--muted)}.flow{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}.node{position:relative;border:1px solid var(--line);border-radius:9px;padding:13px 12px;background:var(--panel)}.node:not(:last-child)::after{content:"→";position:absolute;right:-10px;top:21px;z-index:1;color:var(--blue);font-weight:700}.node b{display:block;margin:5px 0;font-size:13px}.node span{font-size:12px;color:var(--muted)}.step{color:var(--blue);font:10px var(--mono)}.loop-note{margin-top:10px;color:var(--muted);font-size:12px}.loop-note b{color:var(--green)}ul{padding-left:17px;margin:8px 0 0}li{margin:5px 0;color:var(--muted)}li strong{color:var(--text)}.lanes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.lane{border:1px solid var(--line);border-top:3px solid var(--blue);border-radius:8px;padding:12px;background:var(--panel)}.lane.fast{border-top-color:var(--green)}.lane.deliberate{border-top-color:var(--amber)}.lane p{font-size:12px;color:var(--muted);margin-top:6px}.lane b{font-size:15px}.budget{font:12px var(--mono);color:var(--text);margin-top:7px}.notice{border-left:3px solid var(--amber);padding:9px 12px;margin-top:12px;background:var(--panel);font-size:12px;color:var(--muted)}.notice strong{color:var(--amber)}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:9px}th{text-align:left;color:var(--muted);font-weight:500}td,th{padding:7px 0;border-bottom:1px solid var(--line)}td:not(:first-child),th:not(:first-child){text-align:right}.metrics{display:flex;gap:20px;margin:10px 0}.metrics strong{display:block;color:var(--green);font-size:23px;letter-spacing:-.7px}.metrics span{font-size:11px;color:var(--muted)}footer{display:flex;justify-content:space-between;gap:20px;margin-top:22px;padding-top:12px;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}.sources{display:flex;gap:12px;flex-wrap:wrap}.fine{font-size:12px}.architecture{font-size:11px}.architecture span{color:var(--muted)}
+@media(max-width:950px){.flow{grid-template-columns:repeat(3,minmax(0,1fr))}.node:nth-child(3)::after{content:none}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.grid>.card:last-child{grid-column:1/-1}.hero{display:block}.status{margin-top:14px;display:inline-block}.section-head{display:block}.section-head small{display:block;margin-top:4px}}
+@media(max-width:600px){main{padding:24px 16px}.grid,.lanes{grid-template-columns:1fr}.grid>.card:last-child{grid-column:auto}.flow{grid-template-columns:repeat(2,minmax(0,1fr))}.node:nth-child(3)::after{content:"→"}.node:nth-child(even)::after{content:none}footer{display:block}.sources{margin-top:10px}.intro{font-size:14px}}
+@media print{@page{size:A3 landscape;margin:10mm}:root{--bg:#fff;--panel:#fff;--text:#17202d;--muted:#425366;--line:#c5cfda;--blue:#215ba2;--green:#086247;--amber:#8b5200}body{font-size:10px;line-height:1.35;print-color-adjust:exact;-webkit-print-color-adjust:exact}main{max-width:none;padding:0;zoom:.8}.hero{display:flex}.intro{font-size:12px;max-width:900px}h1{font-size:32px}h2{font-size:14px}h3{font-size:11px}.tags{margin:10px 0 14px}.card{padding:12px}.grid{grid-template-columns:repeat(3,minmax(0,1fr))}.grid>.card:last-child{grid-column:auto}.flow{grid-template-columns:repeat(6,minmax(0,1fr))}.node{padding:10px}.node span,.lane p,.notice,.fine,.loop-note{font-size:10px}.node:nth-child(3)::after{content:"→"}section{margin-top:12px}.section-head{display:flex;margin-bottom:8px}pre,.architecture{font-size:9px}td,th{padding:4px 0}table{font-size:10px}.status{margin:0;font-size:10px}.metrics strong{font-size:18px}.card,.lane,.flow{break-inside:avoid}footer{margin-top:12px;font-size:9px}a{text-decoration:none}}
+</style>
+</head>
+<body>
+<main>
+<header class="hero">
+<div>
+<p class="eyebrow">System overview / implementation + experimental routing</p>
+<h1>Horizon Code</h1>
+<p class="intro">A local-first Go coding harness for Qwen3.8-27B on AMD Strix Halo. It turns streamed model output into bounded tool execution, verified workspace changes, and an inspectable event trail. An optional THX-01 classifier allocates reasoning compute—not permissions.</p>
+</div>
+<aside class="status" aria-label="Default behavior"><strong>Local by design</strong>Capability: safe<br>Decision routing: off<br>THX checkpoint: default when enabled</aside>
+</header>
+<div class="tags"><span class="tag">Go + Charm TUI</span><span class="tag">llama.cpp / OpenAI-compatible SSE</span><span class="tag">Qwen3.8-27B · Q4_K_M local lane</span><span class="tag">THX-01 · 322M classifier · CPU sidecar</span></div>
+
+<section aria-labelledby="loop-title">
+<div class="section-head"><h2 id="loop-title">01 / From request to verified answer</h2><small>The agent owns execution; the model proposes actions.</small></div>
+<div class="flow">
+<div class="node"><div class="step">01 · INPUT</div><b>TUI or headless</b><span>Prompt + retained conversation + hierarchical <code>HORIZON.md</code> + capability policy.</span></div>
+<div class="node"><div class="step">02 · ROUTE</div><b>Optional THX</b><span>Choose request-scoped reasoning settings. At most two decisions per turn.</span></div>
+<div class="node"><div class="step">03 · GENERATE</div><b>Qwen via llama.cpp</b><span>Stream reasoning, answer text, telemetry, and fragmented native tool calls.</span></div>
+<div class="node"><div class="step">04 · EXECUTE</div><b>Typed tool registry</b><span>Validate JSON; read/search/edit/patch files or run authorized bounded commands.</span></div>
+<div class="node"><div class="step">05 · CHECK</div><b>Verification gate</b><span>Mutation requires a successful approved build/test/static check before completion.</span></div>
+<div class="node"><div class="step">06 · FINISH</div><b>Answer + journal</b><span>Accept completion only when verification is satisfied and background work is quiescent.</span></div>
+</div>
+<p class="loop-note"><b>Feedback loop:</b> tool results return to Qwen for inspection, implementation, and repair. Verification failures keep the turn open; budgets and cancellation bound the loop. Every emitted decision, tool result, and accepted answer is recorded in private JSONL.</p>
+</section>
+
+<section aria-labelledby="runtime-title">
+<div class="section-head"><h2 id="runtime-title">02 / Runtime boundaries</h2><small>Small components; explicit ownership; no invisible model execution.</small></div>
+<div class="grid">
+<article class="card"><span class="label">Process + model lifecycle</span><h3>Owned Qwen, external THX</h3><ul><li>Launch the configured llama.cpp server; wait for <code>/health</code> and verify the model identity.</li><li>Refuse to claim an already healthy server. Stop the owned process group on exit.</li><li>THX must already be serving loopback HTTP. Horizon never installs, starts, or owns the sidecar.</li><li>Ordinary tests/builds use fakes—not real inference.</li></ul></article>
+<article class="card"><span class="label">State + observability</span><h3>Conversation is live; journals are durable</h3><ul><li>Retain messages and tool evidence across turns in-process; no automatic disk-session restore.</li><li>Compact older complete tool rounds while retaining the request and recent evidence. Active context budget: <strong>48K tokens</strong>.</li><li>Record failures, probabilities, phases, selected lanes, latency, and truncation. Recording failure cancels the turn.</li><li>TUI shows stream/tool activity, decode speed, RAM, and system-wide AMD VRAM/GTT—not model-only GPU usage.</li></ul></article>
+<article class="card"><span class="label">Source map</span><h3>One concern per package</h3><pre class="architecture">cmd/horizon-code   <span>configuration + wiring</span>
+internal/agent     <span>loop, policy, budgets</span>
+internal/model     <span>SSE + request overrides</span>
+internal/decision  <span>typed sidecar HTTP client</span>
+internal/tools     <span>filesystem + execution</span>
+internal/session   <span>append-only JSONL</span>
+internal/tui       <span>Bubble Tea + Lip Gloss</span>
+internal/resources <span>Linux resource sampling</span></pre></article>
+</div>
+</section>
+
+<section aria-labelledby="decision-title">
+<div class="section-head"><h2 id="decision-title">03 / THX-01: a compute allocator, not a second coding agent</h2><small>Off → no calls · Shadow → record only · Active → apply bounded overrides</small></div>
+<div class="grid">
+<article class="card"><span class="label">Three typed questions / one request</span><h3>What THX predicts</h3><ul><li><strong>Choice:</strong> A deliberate, B fast, C uncertain; distribution over all three.</li><li><strong>Score:</strong> task complexity from 0 (lookup) to 3 (complex consequential work).</li><li><strong>Noul:</strong> probability that fulfilling the request requires mutation or state-changing execution.</li></ul><p class="muted fine">THX is non-autoregressive: it classifies compact state rather than writing code. Native extraction/citation capabilities are not currently wired into the agent.</p></article>
+<article class="card"><span class="label">Two bounded decision points</span><h3>Read the actual task before reallocating</h3><ul><li><strong>Turn start:</strong> original request, capability, verification status, prior tool outcome, and context pressure.</li><li><strong>Before step 3:</strong> one reclassification using successful reads from the first two steps, only if no mutation occurred.</li><li>Prioritize task/spec excerpts; strip tool formatting and omit oversized fixture lines. Caps: <strong>1,200 bytes/task</strong>, <strong>256/other</strong>, <strong>1,800 total</strong>.</li></ul><p class="muted fine">The second decision replaces—not compounds—the first allocation. Missing reads do not reopen the window later.</p></article>
+<article class="card"><span class="label">Deterministic controls outrank predictions</span><h3>Fallback and repair stay predictable</h3><ul><li>Strict response validation; loopback-only unauthenticated HTTP; redirects disabled; default deadline <strong>2 seconds</strong>.</li><li>Timeout, malformed output, or explicit abstention preserves normal defaults, unless repair requires deliberate compute.</li><li>Tool failure or pending-verification recovery selects deliberate reasoning independently of sidecar availability.</li><li>Incomplete evidence cannot enable fast mode. THX cannot change registered tools, permissions, or verification requirements.</li></ul></article>
+</div>
+<div class="lanes" style="margin-top:12px">
+<article class="lane fast"><span class="label">B / fast inspection</span><b>Thinking disabled</b><div class="budget">Normal total cap: 4,096 tokens</div><p>Requires P(B) ≥ .55, both auxiliary outputs, complexity ≤ 1.5, mutation probability ≤ .4, and no truncation/abstention. Mutation or failure ends fast routing.</p></article>
+<article class="lane"><span class="label">Normal / fixed baseline + fallback</span><b>Low effort, bounded thinking</b><div class="budget">2,048 thinking / 4,096 total</div><p>Default Qwen lane. <code>reasoning_effort=low</code> is an advisory prompt instruction; llama.cpp’s <code>thinking_budget_tokens</code> is the actual hard reasoning control.</p></article>
+<article class="lane deliberate"><span class="label">A / selective escalation + required repair</span><b>Medium effort, larger finite budget</b><div class="budget">4,096 thinking / 8,192 total</div><p>A requires P(A) ≥ .75. Uncertain C escalates at complexity ≥ 2.5 or mutation probability ≥ .9. Explicit abstention is distinct from C. Thresholds remain experimental.</p></article>
+</div>
+</section>
+
+<section aria-labelledby="trust-title">
+<div class="section-head"><h2 id="trust-title">04 / Safety, evidence, and operating the system</h2><small>Reliable execution is the foundation; routing gains are still a hypothesis.</small></div>
+<div class="grid">
+<article class="card"><span class="label">Capability + completion policy</span><h3>Three explicit execution levels</h3><ul><li><strong>safe:</strong> confined file tools and approved verification commands; default.</li><li><strong>workspace:</strong> patches/path operations, structured argv execution, managed background jobs.</li><li><strong>operator:</strong> adds direct shell and broader autonomy; explicitly authorized only.</li></ul><p class="notice"><strong>Not an OS sandbox.</strong> Broad executables run with the user’s permissions. Purpose labels do not make commands read-only. All background jobs must stop before the successful verification starts.</p><p class="muted fine" style="margin-top:9px"><code>--lock-after-verification</code> optionally blocks further agent mutations after the first passing check and permits two 1,024-token, no-thinking finalization steps. Off by default; it is not best-artifact rollback.</p></article>
+<article class="card"><span class="label">Measured, not promised</span><h3>Latest paired GolfBench: Divisors</h3><table><thead><tr><th scope="col">Metric</th><th scope="col">Qwen only</th><th scope="col">Qwen + THX</th></tr></thead><tbody><tr><th scope="row">Judge</th><td>Pass</td><td>Pass</td></tr><tr><th scope="row">Wall time</th><td>176.967s</td><td>165.781s</td></tr><tr><th scope="row">Generated tokens</th><td>1,627</td><td>1,482</td></tr><tr><th scope="row">Submission</th><td>63 bytes</td><td>64 bytes</td></tr></tbody></table><div class="metrics"><div><strong>464ms</strong><span>post-inspection decision</span></div><div><strong>5 / 5</strong><span>model steps, both lanes</span></div></div><p class="muted fine">THX successfully returned from deliberate inspection to normal reasoning. One unseeded pair does not establish a general gain. An earlier broad-escalation three-task comparison was slower and completed fewer tasks. Laya was rejected after weak routing results.</p></article>
+<article class="card"><span class="label">Build + opt-in active routing</span><h3>Explicit entry points</h3><pre>go build -trimpath -o bin/horizon-code \
+  ./cmd/horizon-code
+
+# Start the external THX sidecar separately.
+bin/horizon-code \
+  --workspace /path/to/repo \
+  --capability workspace \
+  --decision-mode active \
+  --decision-checkpoint doofz/THX-01 \
+  --decision-url http://127.0.0.1:8001 \
+  --decision-timeout 2s</pre><p class="muted fine" style="margin-top:9px">Default launcher: <code>~/.config/horizon-llm/run-server.sh</code>. Add <code>--prompt</code> for headless work. Sessions live under <code>~/.local/state/horizon-code/sessions/</code> or the XDG state directory.</p></article>
+</div>
+</section>
+<footer><div>Implementation snapshot · stabilized commit <code>0d4cfdf</code><br>Offline HTML · no scripts, fonts, trackers, or external assets · print layout: A3 landscape</div><nav class="sources" aria-label="Technical references"><a href="../README.md">Project README</a><a href="v0.1-design.md">Runtime design</a><a href="decision-policy-hardening.md">Policy contract</a><a href="thx01-evidence-pair.md">Benchmark evidence</a></nav></footer>
+</main>
+</body>
+</html>
